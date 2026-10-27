@@ -1,0 +1,136 @@
+openapi: 3.1.0
+info:
+  title: Pushgate notification API
+  version: 1.0.0
+  description: |
+    Sending API for services on trusted local networks. Requests are accepted only from
+    `TRUSTED_CIDRS` (checked before authentication) and only with a per-service API key.
+
+    The admin API under `/admin/api/` is used by the web app with passkey sessions; it does not
+    accept API keys and is intentionally not part of this public contract.
+servers:
+  - url: https://notify.home.example
+security:
+  - serviceKey: []
+paths:
+  /api/v1/notifications:
+    post:
+      summary: Send a notification to all registered devices
+      operationId: sendNotification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Notification' }
+            example:
+              title: Production Alert
+              message: A background worker has stopped.
+              priority: high
+      responses:
+        '200':
+          description: Processed. `status` tells whether devices received it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeliveryResult' }
+        '400':
+          description: Body is not valid JSON or fails schema validation (`invalid_json`, `validation_failed`)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401':
+          description: Missing, malformed, unknown, revoked or expired API key (indistinguishable)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '403':
+          description: |
+            `forbidden` — client address outside `TRUSTED_CIDRS`, or direct access while a proxy is configured.
+            `insufficient_scope` — key may not send (high priority) notifications.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '405': { description: Method not allowed }
+        '413':
+          description: Body over 8 KiB, or encoded notification over the 3 KiB Web Push payload limit
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '415':
+          description: Content-Type is not `application/json`
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '429':
+          description: Rate limit (per key or global) or temporary block after repeated authentication failures
+          headers:
+            Retry-After: { schema: { type: integer }, description: Seconds to wait }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '502':
+          description: Every targeted device failed (`status` = `failed`); body is a DeliveryResult
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeliveryResult' }
+        '503':
+          description: Sending disabled by configuration, paused by the admin, or initial setup incomplete
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+components:
+  securitySchemes:
+    serviceKey:
+      type: http
+      scheme: bearer
+      description: 'Per-service key: `pgk_<16 hex id>_<43 char base64url secret>`'
+  schemas:
+    Notification:
+      type: object
+      additionalProperties: false
+      required: [title, message]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Plain text, single line. Control and bidi-override characters are rejected.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: Plain text; `\n` and `\t` allowed. Never rendered as HTML.
+        priority:
+          type: string
+          enum: [low, normal, high]
+          default: normal
+          description: Maps to the Web Push `Urgency` header and to per-device minimum-priority filters. `high` needs the `notifications:send:high` scope.
+        tag:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,32}$'
+          description: A newer notification with the same tag replaces the older one (also used as Web Push `Topic`).
+        ttl:
+          type: integer
+          minimum: 0
+          maximum: 2419200
+          default: 86400
+          description: Seconds the push service keeps the message while the device is offline.
+    DeliveryResult:
+      type: object
+      required: [id, status, devices]
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [delivered, partial, failed, no_devices, filtered]
+        devices:
+          type: object
+          properties:
+            targeted: { type: integer, description: Devices whose minimum priority allowed this notification }
+            delivered: { type: integer }
+            failed: { type: integer }
+            removed: { type: integer, description: Expired subscriptions (404/410) removed }
+            filtered: { type: integer, description: Devices skipped by their minimum priority }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  issue: { type: string }

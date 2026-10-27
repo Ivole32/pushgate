@@ -1,0 +1,30 @@
+{
+  "name": "pushgate",
+  "version": "1.0.0",
+  "description": "Minimal, self-hosted Web Push notification gateway for an iOS Home Screen web app",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --env-file=.env.development src/server.js",
+    "cli": "node --disable-warning=ExperimentalWarning src/cli.js",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/*.test.js\"",
+    "lint": "eslint .",
+    "audit": "npm audit --omit=dev --audit-level=low",
+    "test:container": "bash scripts/container-test.sh",
+    "scan:image": "bash scripts/security-scan.sh"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "14.0.3",
+    "web-push": "3.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.13.0",
+    "globals": "17.13.0"
+  }
+}

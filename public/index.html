@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#1f6feb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Pushgate">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>Pushgate</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <header>
+    <h1>Pushgate</h1>
+    <button id="logout" class="link" hidden>Sign out</button>
+  </header>
+
+  <main>
+    <p id="flash" class="flash" role="status" hidden></p>
+
+    <section id="install-hint" class="card notice" hidden>
+      <h2>Add to Home Screen first</h2>
+      <p>On iPhone and iPad, web push notifications only work for web apps opened from the Home Screen (iOS/iPadOS 16.4 or later).</p>
+      <ol>
+        <li>Tap the <strong>Share</strong> button in Safari.</li>
+        <li>Choose <strong>Add to Home Screen</strong>, then <strong>Add</strong>.</li>
+        <li>Open Pushgate from the Home Screen icon and sign in there.</li>
+      </ol>
+    </section>
+
+    <section id="unsupported" class="card notice" hidden>
+      <h2>Push notifications are not available here</h2>
+      <p id="unsupported-reason"></p>
+    </section>
+
+    <!-- Signed out -->
+    <section id="login" class="card" hidden>
+      <h2>Sign in</h2>
+      <p>Use the administrator passkey for this server.</p>
+      <button id="login-btn">Sign in with passkey</button>
+    </section>
+
+    <section id="enroll" class="card" hidden>
+      <h2>Set up with enrollment token</h2>
+      <p>Create a one-time token on the server host:</p>
+      <pre>docker compose exec pushgate /nodejs/bin/node src/cli.js enroll-token</pre>
+      <form id="enroll-form">
+        <label>Enrollment token <input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" required maxlength="100"></label>
+        <label>Passkey name <input name="name" required maxlength="64" value="iPhone"></label>
+        <button type="submit">Create passkey</button>
+      </form>
+    </section>
+
+    <!-- Signed in -->
+    <div id="admin" hidden>
+      <section class="card">
+        <h2>This device</h2>
+        <p id="device-state">Checking…</p>
+        <form id="subscribe-form">
+          <label>Device name <input name="name" required maxlength="64" value="iPhone"></label>
+          <label>Minimum priority
+            <select name="min_priority">
+              <option value="low">low (all notifications)</option>
+              <option value="normal">normal and high</option>
+              <option value="high">high only</option>
+            </select>
+          </label>
+          <button type="submit" id="subscribe-btn">Enable notifications on this device</button>
+        </form>
+        <div class="row">
+          <button id="test-self" class="secondary" hidden>Send test notification</button>
+          <button id="unsubscribe-btn" class="danger" hidden>Disable on this device</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Devices</h2>
+        <ul id="devices" class="list"></ul>
+        <button id="test-all" class="secondary">Send test to all devices</button>
+      </section>
+
+      <section class="card">
+        <h2>Service API keys</h2>
+        <div id="new-key" class="secret" hidden>
+          <p><strong>Copy this key now.</strong> It is shown only once and cannot be recovered.</p>
+          <code id="new-key-value"></code>
+          <div class="row">
+            <button id="copy-key" class="secondary">Copy</button>
+            <button id="dismiss-key" class="link">Done</button>
+          </div>
+        </div>
+        <ul id="keys" class="list"></ul>
+        <details>
+          <summary>Create key</summary>
+          <form id="key-form">
+            <label>Service name <input name="name" required maxlength="64" placeholder="e.g. backup-job"></label>
+            <label>Description <input name="description" maxlength="200"></label>
+            <label>Expires on (optional) <input name="expires" type="date"></label>
+            <label class="check"><input name="allow_high" type="checkbox"> Allow high priority</label>
+            <button type="submit">Create key</button>
+          </form>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>Settings</h2>
+        <label class="check"><input id="paused" type="checkbox"> Pause all sending (API returns 503)</label>
+      </section>
+
+      <section class="card">
+        <h2>Health</h2>
+        <dl id="health" class="kv"></dl>
+        <h3>Recent deliveries</h3>
+        <p class="hint">Only metadata is kept; titles and messages are never stored.</p>
+        <ul id="deliveries" class="list compact"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Passkeys</h2>
+        <ul id="passkeys" class="list"></ul>
+        <form id="passkey-form">
+          <label>Name for an additional passkey <input name="name" required maxlength="64" placeholder="e.g. Backup key"></label>
+          <button type="submit" class="secondary">Add passkey</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Security events</h2>
+        <ul id="events" class="list compact"></ul>
+        <button id="more-events" class="link">Load more</button>
+      </section>
+    </div>
+  </main>
+
+  <template id="tpl-item">
+    <li><div class="item-main"><span class="item-title"></span><span class="item-meta"></span></div><div class="item-actions"></div></li>
+  </template>
+</body>
+</html>

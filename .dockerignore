@@ -1,0 +1,6 @@
+# Only package files, src/ and public/ are needed in the build context.
+*
+!package.json
+!package-lock.json
+!src/
+!public/
