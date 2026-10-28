@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end container test of the real compose.yaml:
+#   - the image works when built from an owner-only (umask 077) checkout
 #   - hardening is in effect (non-root, read-only rootfs, no capabilities, no-new-privileges)
 #   - the port is published on 127.0.0.1 only, inside 2000-2999
 #   - the host reverse proxy (simulated with curl on 127.0.0.1) is the only trusted forwarder;
@@ -54,6 +55,17 @@ send() {
     -H "Authorization: Bearer $1" -H 'Content-Type: application/json' \
     -d '{"title":"ctest","message":"hello"}'
 }
+
+# A checkout made with a strict umask (077) has owner-only files. The image must still be
+# readable by the non-root runtime user (and not writable by it).
+tar --mode="go-rwx" -cf - Dockerfile .dockerignore package.json package-lock.json src public > "$WORK/strict.tar"
+docker build -q -t pushgate:ctest-strict - < "$WORK/strict.tar" >/dev/null
+docker run --rm pushgate:ctest-strict src/cli.js --help >/dev/null 2>&1 \
+  || { docker rmi -f pushgate:ctest-strict >/dev/null; fail "image built from an owner-only checkout cannot start"; }
+docker run --rm --entrypoint /nodejs/bin/node pushgate:ctest-strict -e "require('fs').writeFileSync('/app/src/x','x')" 2>/dev/null \
+  && { docker rmi -f pushgate:ctest-strict >/dev/null; fail "application files writable by the runtime user"; }
+docker rmi -f pushgate:ctest-strict >/dev/null
+pass "image built from a umask-077 checkout runs; app files not writable by the runtime user"
 
 up
 pass "stack started and healthy"

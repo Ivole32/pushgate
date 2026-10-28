@@ -340,6 +340,18 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
 | Host compromised | Treat everything as leaked: new `secrets/` (new pepper ⇒ recreate all keys; new VAPID key ⇒ re-subscribe devices), new passkeys, reinstall host. |
 | Sending storm | Toggle *Pause all sending* in the app, or set `NOTIFICATIONS_ENABLED=false` and `docker compose up -d`. |
 
+## Troubleshooting the deployment
+
+- **`Cannot read package config /app/package.json: permission denied`** (container keeps
+  restarting): older images copied the checkout's permission bits, so a checkout made with
+  `umask 077` was unreadable by the runtime user. Update and rebuild:
+  `git pull && docker compose up -d --build`.
+- **`API key pepper file is unreadable`** (or VAPID key) at startup: the secret files must be
+  readable by uid 65532: `sudo chown 65532:65532 secrets/* && sudo chmod 400 secrets/*`.
+- **Compose: `Pool overlaps with other one on this space`**: another Docker network already uses
+  part of `172.20.2.0/24`. List subnets with
+  `docker network inspect -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}' $(docker network ls -q)`.
+
 ## Troubleshooting iOS delivery
 
 - **No "Enable notifications" button / "not supported":** open the app from the Home Screen icon,

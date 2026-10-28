@@ -8,7 +8,14 @@ FROM ${BUILD_IMAGE} AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
- && npm cache clean --force \
+ && npm cache clean --force
+COPY src ./src
+COPY public ./public
+# COPY keeps the permission bits of the checkout. A checkout made with a strict umask (077) would
+# leave files readable only by root, so normalise: owned by root, world-readable, not writable
+# by the runtime user.
+RUN chown -R 0:0 /app \
+ && chmod -R u=rwX,go=rX /app \
  && mkdir -p /out/data
 
 # ---- runtime: distroless, no shell, no package manager, non-root (uid 65532) ----
@@ -18,10 +25,7 @@ ENV NODE_ENV=production \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning \
     PORT=8080 \
     DATA_DIR=/data
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json ./
-COPY src ./src
-COPY public ./public
+COPY --from=deps /app /app
 # Empty, non-root-owned data directory: a new named volume inherits this ownership.
 COPY --from=deps --chown=65532:65532 /out/data /data
 USER 65532:65532
