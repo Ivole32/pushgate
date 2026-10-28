@@ -24,8 +24,9 @@ Data flow for one notification:
 1. The host proxy terminates TLS and **overwrites** `X-Forwarded-For` with the TCP peer address.
 2. pushgate checks that the TCP peer is the trusted proxy (the Docker gateway; otherwise: reject),
    takes the single client address from `X-Forwarded-For`, and checks it against `TRUSTED_CIDRS`.
-3. Per-IP brute-force block check, then API key parse (format check), lookup by public key id,
-   HMAC comparison in constant time, revocation/expiry/scope check.
+3. API key parse (format check), lookup by public key id, HMAC comparison in constant time,
+   revocation/expiry/scope check. Invalid keys count toward a per-client block; a blocked client's
+   further failures get 429, but a valid key is always served.
 4. Per-key and global rate limits.
 5. Only now is the body read (8 KiB cap), parsed and validated against a strict schema.
 6. The payload (≤ 3 KiB of JSON) is encrypted per device by the `web-push` library (aes128gcm,
@@ -109,8 +110,16 @@ Base images are pinned by digest.
    expires after 5 minutes and is single use (recorded only after a successful verification, with
    no `await` between check and insert). Forged/stale challenges do not count toward the
    brute-force block; unauthenticated admin endpoints have an in-app per-client rate limit.
+   Sessions record when their holder last completed a passkey ceremony (`verified_at`); adding or
+   removing passkeys, creating or rotating API keys and registering devices require that to be
+   under 5 minutes old (`reauth` ceremony otherwise). Security-relevant changes are pushed to all
+   devices; a recovery enrollment deletes all sessions. Stored credential ids must match the API's
+   id pattern and transports are filtered to known values, so a planted passkey stays removable.
 7. **Brute-force counters** are keyed per IPv4 address or IPv6 /64, are not reset by a
-   successful request, and active blocks are never evicted from the bounded in-memory table.
+   successful request, and active blocks are kept in the in-memory table up to twice its normal
+   size. A block refuses only failed attempts: valid keys from a blocked address are still served.
+   Persisted rejection events are throttled per client (/64) and in total (60 rows per minute;
+   the rest are logged and summarised as `audit.suppressed`).
 8. **Service keys cannot administer anything.** The admin API accepts only passkey sessions; API keys
    are accepted only by `/api/v1/notifications`.
 9. **Subscription endpoint allowlist** (Apple, Google, Mozilla, Microsoft push hosts by default) so a
@@ -118,6 +127,10 @@ Base images are pinned by digest.
 10. **Content is data, never markup.** The service worker passes title/body as plain strings to
    `showNotification`; the admin UI uses only `textContent`; CSP forbids inline script.
    Notification click always opens the app's own start page — requests cannot supply URLs or actions.
+   The title is prefixed with the sending key's name, and tags are scoped per service (rotation
+   lineage) and HMAC'd with the pepper, so services cannot impersonate or replace each other.
+   Requests with non-canonical paths (`\`, dot segments) are refused so the proxy and the router
+   always see the same path.
 11. **No notification content at rest** by default; logs never contain bodies, headers or keys.
 
 ## Threat model (summary)

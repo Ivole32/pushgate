@@ -17,6 +17,8 @@ export function createServer(app) {
 }
 
 function main() {
+  // The database and its WAL/SHM side files hold subscription secrets: create them private.
+  process.umask(0o077);
   let config;
   try {
     config = loadConfig(process.env);

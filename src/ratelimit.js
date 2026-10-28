@@ -4,12 +4,14 @@
 const MAX_TRACKED = 10000;
 
 // Bounded memory: when full, drop the oldest tenth of the entries (Map keeps insertion order),
-// skipping entries for which keep() is true.
+// skipping entries for which keep() is true. Kept entries may use up to twice the normal
+// size; beyond that the oldest go regardless, so memory stays bounded under any churn.
 function makeRoom(map, keep = () => false) {
   if (map.size < MAX_TRACKED) return;
+  const hardLimit = map.size >= 2 * MAX_TRACKED;
   let n = Math.ceil(MAX_TRACKED / 10);
   for (const [key, value] of map) {
-    if (keep(value)) continue;
+    if (keep(value) && !hardLimit) continue;
     map.delete(key);
     if (--n === 0) break;
   }
@@ -63,7 +65,7 @@ export function createFailureLimiter({ limit, windowMs, blockMs, now = () => Dat
       let e = entries.get(id);
       if (!e || t - e.start > windowMs) {
         entries.delete(id);
-        // Active blocks are never evicted, so address churn cannot lift them.
+        // Active blocks are kept (up to the hard limit), so address churn cannot lift them.
         makeRoom(entries, (v) => v.blockedUntil > t);
         e = { start: t, count: 0, blockedUntil: 0 };
         entries.set(id, e);

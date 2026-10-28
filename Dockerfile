@@ -1,5 +1,5 @@
-# syntax=docker/dockerfile:1
-# Base images are pinned by digest. Update both tag and digest together (see README "Updating").
+# Base images are pinned by digest. (No "# syntax=" line: that would pull an unpinned
+# BuildKit frontend image on every build.) Update both tag and digest together (see README "Updating").
 ARG BUILD_IMAGE=node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
 ARG RUNTIME_IMAGE=gcr.io/distroless/nodejs24-debian13:nonroot@sha256:cb606325b7ec4af55462cb0b424a53b452a5b4a894ffe841fcf1048d216fb9f8
 
@@ -16,7 +16,7 @@ COPY public ./public
 # by the runtime user.
 RUN chown -R 0:0 /app \
  && chmod -R u=rwX,go=rX /app \
- && mkdir -p /out/data
+ && mkdir -p -m 700 /out/data
 
 # ---- runtime: distroless, no shell, no package manager, non-root (uid 65532) ----
 FROM ${RUNTIME_IMAGE}

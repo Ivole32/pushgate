@@ -8,7 +8,8 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 cd "$(dirname "$0")/.."
 
-TRIVY_IMAGE="${TRIVY_IMAGE:-aquasec/trivy:0.76.1}"
+# Pinned by digest like the base images: this image runs in CI with the source checked out.
+TRIVY_IMAGE="${TRIVY_IMAGE:-aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c}"
 IMAGE="${1:-pushgate:scan}"
 WORK="$(mktemp -d)"
 command -v cygpath >/dev/null && WORK="$(cygpath -m "$WORK")"

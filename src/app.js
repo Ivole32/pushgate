@@ -89,7 +89,10 @@ export function createApp({ config, db, log, send }) {
       url = null;
     }
     try {
-      if (!url || req.url.length > 2048) throw errors.badRequest();
+      // Only canonical paths: the URL parser turns "\" into "/" and resolves (encoded) dot
+      // segments, which a reverse proxy does not, so its location rules (rate limits, allow
+      // lists) could see a different path than the router here.
+      if (!url || req.url.length > 2048 || req.url.split('?')[0] !== url.pathname) throw errors.badRequest();
       await route(req, res, url, client, requestId);
     } catch (err) {
       if (err instanceof HttpError) {

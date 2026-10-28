@@ -34,10 +34,10 @@ const u32 = (n) => {
   return b;
 };
 
-export function createSoftAuthenticator({ origin, rpId }) {
+export function createSoftAuthenticator({ origin, rpId, idLength = 16 }) {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const jwk = publicKey.export({ format: 'jwk' });
-  const credentialId = crypto.randomBytes(16);
+  const credentialId = crypto.randomBytes(idLength);
   const rpIdHash = sha256(rpId);
   let counter = 0;
   let userHandle = null;
@@ -45,7 +45,7 @@ export function createSoftAuthenticator({ origin, rpId }) {
   return {
     id: b64url(credentialId),
 
-    register(options, { clientOrigin = origin } = {}) {
+    register(options, { clientOrigin = origin, transports = ['internal'] } = {}) {
       userHandle = options.user.id;
       const clientData = Buffer.from(JSON.stringify({ type: 'webauthn.create', challenge: options.challenge, origin: clientOrigin, crossOrigin: false }));
       const coseKey = cbor(new Map([[1, 2], [3, -7], [-1, 1], [-2, Buffer.from(jwk.x, 'base64url')], [-3, Buffer.from(jwk.y, 'base64url')]]));
@@ -56,7 +56,7 @@ export function createSoftAuthenticator({ origin, rpId }) {
         id: b64url(credentialId),
         rawId: b64url(credentialId),
         type: 'public-key',
-        response: { clientDataJSON: b64url(clientData), attestationObject: b64url(attestationObject), transports: ['internal'] },
+        response: { clientDataJSON: b64url(clientData), attestationObject: b64url(attestationObject), transports },
         clientExtensionResults: {},
       };
     },

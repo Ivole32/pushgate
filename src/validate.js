@@ -6,9 +6,11 @@
 //   array:   items (field spec), maxItems
 //   object:  fields (map of field specs)
 
-// C0/C1 control characters and Unicode bidi overrides/isolates (which can disguise text).
-const CONTROL = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F‪-‮⁦-⁩]/;
-const CONTROL_SINGLE_LINE = /[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/;
+// Characters that can disguise text: controls (Cc), invisible format characters such as bidi
+// marks/overrides/isolates, zero-width spaces and BOM (Cf), and the line/paragraph separators
+// U+2028/U+2029, which break "single-line" fields. ZWJ stays allowed for emoji sequences.
+const CONTROL = /(?![\n\t‍])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const CONTROL_SINGLE_LINE = /(?!‍)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 function check(value, spec, path, errors) {
   switch (spec.type) {

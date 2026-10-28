@@ -28,6 +28,13 @@ function retryDelay(err, attempt) {
 export function createPusher({ config, db, devices, audit, log, send = webpush.sendNotification, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() }) {
   const vapidDetails = { subject: config.vapidSubject, publicKey: config.vapid.publicKey, privateKey: config.vapid.privateKey };
 
+  // A tag replaces earlier notifications with the same tag, on the device and (as the Web Push
+  // Topic header) in the push service's queue. Tags are therefore scoped to the sending service,
+  // so one service cannot replace or cancel another's alerts, and keyed with the pepper, so the
+  // push service does not see the tag text. 32 base64url characters, the Topic header maximum.
+  const scopedTag = (scope, tag) =>
+    crypto.createHmac('sha256', config.pepper).update(`tag\0${scope}\0${tag}`).digest('base64url').slice(0, 32);
+
   async function sendOne(device, payload, { ttl, priority, tag }) {
     const subscription = { endpoint: device.endpoint, keys: { p256dh: device.p256dh, auth: device.auth } };
     const options = { vapidDetails, TTL: ttl, urgency: priority, timeout: REQUEST_TIMEOUT_MS };
@@ -51,15 +58,17 @@ export function createPusher({ config, db, devices, audit, log, send = webpush.s
 
   // Delivers one notification to all registered devices (or one device for tests).
   // Never throws for delivery problems; returns a summary safe to show to the caller.
-  async function deliver({ keyId = null, title, message, priority = 'normal', tag = null, ttl = DEFAULT_TTL, service, deviceId = null }) {
+  // `tagScope` identifies the sending service across key rotations (see apikeys.lineage).
+  async function deliver({ keyId = null, title, message, priority = 'normal', tag = null, tagScope = keyId, ttl = DEFAULT_TTL, service, deviceId = null }) {
     const id = crypto.randomUUID();
-    const payload = buildPayload({ id, title, message, priority, tag, service, ts: now() });
+    const scoped = tag ? scopedTag(tagScope ?? service, tag) : null;
+    const payload = buildPayload({ id, title, message, priority, tag: scoped, service, ts: now() });
     if (Buffer.byteLength(payload) > MAX_PAYLOAD_BYTES) return { error: 'payload_too_large' };
 
     const all = devices.targets(deviceId);
     const eligible = all.filter((d) => priorityRank(priority) >= priorityRank(d.min_priority));
     const results = await Promise.all(eligible.map(async (d) => {
-      const r = await sendOne(d, payload, { ttl, priority, tag });
+      const r = await sendOne(d, payload, { ttl, priority, tag: scoped });
       if (r.outcome === 'gone') {
         devices.remove(d.id);
         audit.record('device.expired', { detail: { device: d.id, name: d.name, status: r.status } });

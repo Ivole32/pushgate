@@ -24,10 +24,13 @@ test('CIDR matching for IPv4, IPv6 and IPv4-mapped addresses', () => {
 
 test('invalid CIDR configuration fails closed', () => {
   for (const bad of ['', ' , ', '192.168.1.0', '192.168.1.0/33', '192.168.1.1/24', '0.0.0.0/0', '::/0', 'abc/8',
-    '10.0.0.0/8,foo', '::ffff:10.0.0.0/104', '10.0.0.0/-1', '10.0.0.0/08x']) {
+    '10.0.0.0/8,foo', '::ffff:10.0.0.0/104', '10.0.0.0/-1', '10.0.0.0/08x',
+    // Very wide ranges that together amount to "everyone".
+    '0.0.0.0/1,128.0.0.0/1', '0.0.0.0/7', '::/1,8000::/1', '2000::/3']) {
     assert.throws(() => parseCidrList(bad), Error, `should reject "${bad}"`);
   }
   assert.equal(parseCidr('10.0.0.0/8').prefix, 8);
+  assert.equal(parseCidr('fc00::/7').prefix, 7);
 });
 
 test('configuration refuses to start without trusted networks, secrets or HTTPS', () => {

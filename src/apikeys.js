@@ -77,6 +77,17 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
     return { ok: true, key: publicView(row) };
   }
 
+  // The first key of a rotation chain: a stable identity for one service across rotations.
+  function lineage(id) {
+    let current = id;
+    for (let i = 0; i < 1000; i++) {
+      const row = db.prepare('SELECT rotated_from FROM api_keys WHERE id = ?').get(current);
+      if (!row?.rotated_from) return current;
+      current = row.rotated_from;
+    }
+    return current;
+  }
+
   function revoke(id) {
     const res = db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(now(), id);
     return res.changes === 1;
@@ -111,5 +122,5 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
     });
   }
 
-  return { create, get, list, verify, revoke, rotate };
+  return { create, get, list, verify, lineage, revoke, rotate };
 }

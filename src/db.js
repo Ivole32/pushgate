@@ -79,6 +79,11 @@ const MIGRATIONS = [
     value  TEXT NOT NULL
   );
   `,
+  // When the session holder last proved presence with a passkey (sign-in or re-confirmation).
+  // Sensitive changes require this to be recent. Existing sessions count as not verified.
+  `
+  ALTER TABLE sessions ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export function openDatabase(dataDir) {

@@ -48,6 +48,10 @@ export function parseCidr(text) {
   if (prefix > bits) throw new Error(`invalid CIDR "${raw}": prefix too long`);
   // A /0 range matches every address. That is never a "trusted local network".
   if (prefix === 0) throw new Error(`refusing CIDR "${raw}": /0 would allow every address`);
+  // Nor are a few very wide ranges (e.g. 0.0.0.0/1 + 128.0.0.0/1). The limits still allow the
+  // widest private ranges: 10.0.0.0/8 and fc00::/7.
+  const minPrefix = family === 4 ? 8 : 7;
+  if (prefix < minPrefix) throw new Error(`refusing CIDR "${raw}": prefixes shorter than /${minPrefix} cover too much of the internet`);
   if (family === 6 && /^::ffff:/i.test(addr)) throw new Error(`invalid CIDR "${raw}": use the IPv4 form instead of IPv4-mapped IPv6`);
   const value = family === 4 ? ipv4ToBigInt(addr) : ipv6ToBigInt(addr);
   const mask = ((1n << BigInt(prefix)) - 1n) << BigInt(bits - prefix);

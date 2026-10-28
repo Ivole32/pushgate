@@ -15,11 +15,31 @@ import { CHALLENGE_TOKEN_PATTERN } from '../validate.js';
 
 export const SESSION_COOKIE = '__Host-pushgate_session';
 export const ENROLLMENT_TOKEN_TTL_MS = 15 * 60 * 1000;
+// Credential ids are client-chosen; anything stored must stay addressable by the API.
+export const PASSKEY_ID = /^[A-Za-z0-9_-]{1,512}$/;
+// Sensitive changes (passkeys, API keys, new devices) need a passkey confirmation this recent,
+// so a borrowed or stolen session cookie alone cannot take over the account.
+export const REVERIFY_AFTER_MS = 5 * 60 * 1000;
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const ENROLLMENT_PATTERN = /^pge_[A-Za-z0-9_-]{43}$/;
 const SESSION_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const TRANSPORTS = new Set(['ble', 'cable', 'hybrid', 'internal', 'nfc', 'smart-card', 'usb']);
 
 const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+
+// Transports come verbatim from the client and are echoed to browsers in excludeCredentials,
+// where an invalid value makes navigator.credentials.create() throw. Keep only known names.
+export function cleanTransports(value) {
+  return Array.isArray(value) ? [...new Set(value.filter((t) => TRANSPORTS.has(t)))] : [];
+}
+
+function parseTransports(json) {
+  try {
+    return cleanTransports(JSON.parse(json));
+  } catch {
+    return [];
+  }
+}
 
 export function createAdminAuth({ db, config, now = () => Date.now() }) {
   const origin = config.publicOrigin;
@@ -117,7 +137,7 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
       userName: 'admin',
       userDisplayName: 'Pushgate administrator',
       attestationType: 'none',
-      excludeCredentials: existing.map((p) => ({ id: p.id, transports: JSON.parse(p.transports) })),
+      excludeCredentials: existing.map((p) => ({ id: p.id, transports: parseTransports(p.transports) })),
       authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
       supportedAlgorithmIDs: [-7, -257],
     });
@@ -142,32 +162,39 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
       return { error: 'invalid' };
     }
     if (!result.verified || !result.registrationInfo) return { error: 'invalid' };
-    if (!consumeChallenge(c)) return { error: 'challenge' };
     const cred = result.registrationInfo.credential;
+    // The library accepts credential ids of any length; an id the API cannot address could
+    // never be removed again.
+    if (typeof cred.id !== 'string' || !PASSKEY_ID.test(cred.id)) return { error: 'invalid' };
+    if (!consumeChallenge(c)) return { error: 'challenge' };
     return transaction(db, () => {
       if (kind === 'enroll') {
         // Consume the token atomically with storing the passkey.
         const res = db.prepare('UPDATE enrollment_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?')
           .run(now(), sha256(token), now());
         if (res.changes !== 1) return { error: 'invalid' };
+        // Recovery: whoever held a session before (possibly the reason for recovering) is
+        // signed out. The caller starts a new session for the enrolling device.
+        db.prepare('DELETE FROM sessions').run();
       }
       if (db.prepare('SELECT 1 FROM passkeys WHERE id = ?').get(cred.id)) return { error: 'invalid' };
       db.prepare('INSERT INTO passkeys (id, public_key, counter, transports, name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(cred.id, Buffer.from(cred.publicKey), cred.counter, JSON.stringify(cred.transports ?? []), name, now());
+        .run(cred.id, Buffer.from(cred.publicKey), cred.counter, JSON.stringify(cleanTransports(cred.transports)), name, now());
       return { id: cred.id };
     });
   }
 
   // ---- authentication -------------------------------------------------------------------
 
-  async function authenticationOptions() {
+  // kind 'login' starts a session; kind 'reauth' re-confirms the holder of an existing one.
+  async function authenticationOptions(kind = 'login') {
     const options = await generateAuthenticationOptions({ rpID, userVerification: 'required', allowCredentials: [] });
-    return { challengeId: issueChallenge('login', options.challenge), options };
+    return { challengeId: issueChallenge(kind, options.challenge), options };
   }
 
   // Same result shape as verifyRegistration.
-  async function verifyAuthentication({ challengeId, response }) {
-    const c = openChallenge(challengeId, 'login');
+  async function verifyAuthentication({ challengeId, response, kind = 'login' }) {
+    const c = openChallenge(challengeId, kind);
     if (!c) return { error: 'challenge' };
     const row = typeof response.id === 'string' ? db.prepare('SELECT * FROM passkeys WHERE id = ?').get(response.id) : null;
     if (!row) return { error: 'invalid' };
@@ -178,7 +205,7 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
         expectedChallenge: c.challenge,
         expectedOrigin: origin,
         expectedRPID: rpID,
-        credential: { id: row.id, publicKey: new Uint8Array(row.public_key), counter: row.counter, transports: JSON.parse(row.transports) },
+        credential: { id: row.id, publicKey: new Uint8Array(row.public_key), counter: row.counter, transports: parseTransports(row.transports) },
         requireUserVerification: true,
       });
     } catch {
@@ -186,7 +213,8 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
     }
     if (!result.verified) return { error: 'invalid' };
     if (!consumeChallenge(c)) return { error: 'challenge' };
-    db.prepare('UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?').run(result.authenticationInfo.newCounter, now(), row.id);
+    // MAX: concurrent sign-ins finish in any order; the stored counter must never go back.
+    db.prepare('UPDATE passkeys SET counter = MAX(counter, ?), last_used_at = ? WHERE id = ?').run(result.authenticationInfo.newCounter, now(), row.id);
     return { id: row.id };
   }
 
@@ -195,24 +223,34 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
       .map((p) => ({ id: p.id, name: p.name, created_at: p.created_at, last_used_at: p.last_used_at }));
   }
 
-  // Refuses to delete the last passkey so the administrator cannot lock themselves out.
-  function removePasskey(id) {
+  // Refuses to delete the last passkey so the administrator cannot lock themselves out. The CLI
+  // (shell access to the host) may remove any passkey; a new one is enrolled with a token.
+  function removePasskey(id, { allowLast = false } = {}) {
     return transaction(db, () => {
-      if (db.prepare('SELECT COUNT(*) AS n FROM passkeys').get().n <= 1) return 'last';
+      if (!allowLast && db.prepare('SELECT COUNT(*) AS n FROM passkeys').get().n <= 1) return 'last';
       return db.prepare('DELETE FROM passkeys WHERE id = ?').run(id).changes === 1 ? 'ok' : 'missing';
     });
   }
 
   // ---- sessions -------------------------------------------------------------------------
 
+  // Sessions are only created right after a passkey ceremony, so they start verified.
   function createSession(passkeyId) {
     const token = crypto.randomBytes(32).toString('base64url');
     const csrf = crypto.randomBytes(32).toString('base64url');
     const t = now();
     const expiresAt = t + config.sessionMaxHours * 3600000;
-    db.prepare('INSERT INTO sessions (token_hash, csrf_token, passkey_id, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(sha256(token), csrf, passkeyId, t, t, expiresAt);
+    db.prepare('INSERT INTO sessions (token_hash, csrf_token, passkey_id, created_at, last_seen_at, expires_at, verified_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(sha256(token), csrf, passkeyId, t, t, expiresAt, t);
     return { token, csrf, expiresAt };
+  }
+
+  function markVerified(hash) {
+    db.prepare('UPDATE sessions SET verified_at = ? WHERE token_hash = ?').run(now(), hash);
+  }
+
+  function recentlyVerified(session) {
+    return now() - session.verifiedAt < REVERIFY_AFTER_MS;
   }
 
   function getSession(token) {
@@ -226,7 +264,7 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
       return null;
     }
     db.prepare('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?').run(t, hash);
-    return { hash, csrf: row.csrf_token, passkeyId: row.passkey_id, expiresAt: row.expires_at };
+    return { hash, csrf: row.csrf_token, passkeyId: row.passkey_id, expiresAt: row.expires_at, verifiedAt: row.verified_at };
   }
 
   function destroySession(hash) {
@@ -248,6 +286,8 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
     listPasskeys,
     removePasskey,
     createSession,
+    markVerified,
+    recentlyVerified,
     getSession,
     destroySession,
     revokeAllSessions,

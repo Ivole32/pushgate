@@ -93,7 +93,7 @@ components:
         tag:
           type: string
           pattern: '^[A-Za-z0-9_-]{1,32}$'
-          description: A newer notification with the same tag replaces the older one (also used as Web Push `Topic`).
+          description: A newer notification with the same tag from the same service (key and its rotated successors) replaces the older one. Sent to the push service only as a keyed hash (Web Push `Topic`).
         ttl:
           type: integer
           minimum: 0

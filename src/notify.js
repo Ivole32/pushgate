@@ -13,21 +13,26 @@ export function createNotifyHandler({ config, db, keys, auth, pusher, audit, lim
     const ip = client.ip;
     const who = clientKey(ip);
 
-    // 1. Clients that recently failed authentication too often are refused before any work.
-    const blocked = limits.apiFailures.blockedFor(who);
-    if (blocked) {
-      audit.recordThrottled('auth.blocked', { ip, detail: { zone: 'api' } });
-      throw errors.rateLimited(blocked);
-    }
-
-    // 2. API key. All failure reasons produce the same response.
+    // 1. API key. All failure reasons produce the same response.
     const header = req.headers.authorization;
     const match = typeof header === 'string' ? /^Bearer ([^\s]{1,200})$/.exec(header) : null;
     const result = match ? keys.verify(match[1]) : { ok: false, reason: 'missing', keyId: null };
     if (!result.ok) {
+      // 2. Clients that failed too often get 429 for further failures, which are not counted.
+      // The block applies only to failures: senders behind the same NAT, /64 or host would
+      // otherwise lose their alerts to one neighbour's bad requests. Guessing stays hopeless
+      // (256-bit keys), and the block still marks the client in the security events.
+      const blocked = limits.apiFailures.blockedFor(who);
+      if (blocked) {
+        audit.recordThrottled('auth.blocked', { ip, detail: { zone: 'api', key_id: result.keyId } });
+        throw errors.rateLimited(blocked);
+      }
       const nowBlocked = limits.apiFailures.fail(who);
       audit.recordThrottled('auth.failed', { ip, detail: { reason: result.reason, key_id: result.keyId, blocked: nowBlocked } });
       throw errors.unauthorized();
+    }
+    if (limits.apiFailures.blockedFor(who)) {
+      audit.recordThrottled('auth.valid_key_while_blocked', { actor: `key:${result.key.id}`, ip });
     }
     const key = result.key;
     if (!key.scopes.includes(SCOPES.SEND)) {
@@ -69,6 +74,7 @@ export function createNotifyHandler({ config, db, keys, auth, pusher, audit, lim
       message: body.message,
       priority,
       tag: body.tag ?? null,
+      tagScope: keys.lineage(key.id),
       ttl: body.ttl ?? DEFAULT_TTL,
       service: key.name,
     });
