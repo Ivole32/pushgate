@@ -2,22 +2,28 @@
 
 ## Overview
 
-Pushgate is one Node.js process behind a TLS reverse proxy (Caddy). It stores metadata in SQLite and
-sends notifications through the standard Web Push protocol to an iOS Home Screen web app (PWA).
+Pushgate is one Node.js container published on `127.0.0.1` only, behind the host's own TLS reverse
+proxy. It stores metadata in SQLite and sends notifications through the standard Web Push protocol
+to an iOS Home Screen web app (PWA).
 
 ```
- LAN service ──HTTPS──▶ Caddy ──HTTP (internal docker network)──▶ pushgate ──HTTPS (VAPID, RFC 8291)──▶ Apple Web Push ──▶ iPhone PWA
-   (curl, cron,          :443     X-Forwarded-For overwritten         │                                                        service worker
-    monitoring)                                                      ▼                                                        showNotification()
-                                                               SQLite on /data
- iPhone (admin) ──HTTPS──▶ Caddy ──▶ pushgate /  (PWA, passkey login, device registration, key management)
+ LAN service ──HTTPS──▶ host reverse proxy ──HTTP──▶ 127.0.0.1:2580 ──▶ pushgate ──HTTPS (VAPID, RFC 8291)──▶ Apple Web Push ──▶ iPhone PWA
+   (curl, cron,          :443, overwrites        (Docker publish,     172.20.2.10:8080                                     service worker
+    monitoring)          X-Forwarded-For          loopback only)       │                                                    showNotification()
+                                                                       ▼
+                                                                 SQLite on /data
+ iPhone (admin) ──HTTPS──▶ host reverse proxy ──▶ pushgate /  (PWA, passkey login, device registration, key management)
 ```
+
+Deployment constraints: one Docker network `172.20.2.0/24` (gateway `172.20.2.1`), published ports
+only on `127.0.0.1` and only in the range 2000-2999. Traffic to the loopback-published port enters
+the container from the network gateway, so the gateway is the single `TRUSTED_PROXIES` entry.
 
 Data flow for one notification:
 
-1. Caddy terminates TLS and **overwrites** `X-Forwarded-For` with the TCP peer address.
-2. pushgate checks that the TCP peer is the configured proxy (otherwise: reject), takes the single
-   client address from `X-Forwarded-For`, and checks it against `TRUSTED_CIDRS`.
+1. The host proxy terminates TLS and **overwrites** `X-Forwarded-For` with the TCP peer address.
+2. pushgate checks that the TCP peer is the trusted proxy (the Docker gateway; otherwise: reject),
+   takes the single client address from `X-Forwarded-For`, and checks it against `TRUSTED_CIDRS`.
 3. Per-IP brute-force block check, then API key parse (format check), lookup by public key id,
    HMAC comparison in constant time, revocation/expiry/scope check.
 4. Per-key and global rate limits.
@@ -36,7 +42,7 @@ Data flow for one notification:
 | `web-push` | De-facto standard, maintained Web Push + VAPID implementation | 5 small transitive dependencies |
 | `@simplewebauthn/server` | Mature WebAuthn/passkey verification | ~10 transitive dependencies (ASN.1 parsing) |
 | Vanilla JS PWA | No build step, no frontend dependencies, strict CSP without `unsafe-inline` | Plain DOM code |
-| Caddy | Automatic TLS (internal CA or ACME DNS-01), safe forwarding-header defaults | Second container |
+| Host reverse proxy (existing) | Ports may only be published on loopback, so TLS and LAN exposure stay with the proxy already on the host; examples for Caddy and nginx | The proxy must overwrite `X-Forwarded-For`; any host process can reach the loopback port |
 | distroless `nodejs24` (nonroot) | No shell or package manager in the runtime image | Debugging requires `docker cp`/ a debug image |
 
 Runtime dependencies are pinned exactly in `package.json` and locked in `package-lock.json`.
@@ -85,7 +91,7 @@ Base images are pinned by digest.
    unknown key id still performs an HMAC against a dummy value.
 3. **Network ACL before authentication.** Unknown networks get `403` before any key is parsed.
    Forwarding headers are honoured *only* when the TCP peer is in `TRUSTED_PROXIES`, and then the
-   header must contain exactly one address (Caddy is configured to overwrite it). When a proxy is
+   header must contain exactly one address (the host proxy must overwrite it). When a proxy is
    configured, direct connections from anything else are refused (except the loopback health check).
 4. **Fail closed configuration.** Missing/invalid `TRUSTED_CIDRS`, `ADMIN_CIDRS`, `/0` ranges,
    missing secrets or a non-HTTPS public origin abort startup.
@@ -116,10 +122,10 @@ secrets (`endpoint`, `p256dh`, `auth`), VAPID private key, pepper.
 
 | Threat | Mitigation | Residual risk |
 |---|---|---|
-| Internet attacker | App never published; Caddy bound to a LAN address; host firewall; CIDR ACL | Misconfigured port forwarding on the router |
+| Internet attacker | Container published on 127.0.0.1 only; host proxy firewalled to the LAN; CIDR ACL | Misconfigured port forwarding on the router |
 | Malicious/compromised LAN host without a key | Per-service API key required; brute-force blocks; rate limits | Can probe the UI/login page (passkey required) |
 | Compromised service host | Can only use *its own* key (only send, optionally not `high`); revoke/rotate one key | Can send spam until revoked |
-| Spoofed `X-Forwarded-For` | Header ignored unless TCP peer is the trusted proxy; Caddy overwrites it | Wrong `TRUSTED_PROXIES` value |
+| Spoofed `X-Forwarded-For` | Header ignored unless TCP peer is the trusted proxy (Docker gateway); host proxy overwrites it | Host proxy that appends/forwards client headers; local host processes can reach the loopback port |
 | IP spoofing | TCP handshake makes blind spoofing impractical for request/response; keys still required | On-path attacker on same L2 (ARP spoofing) can impersonate an IP — keys and TLS still apply |
 | CSRF / XSS on admin UI | SameSite=Strict, CSRF header + Origin check, strict CSP, no `innerHTML` | Browser bugs |
 | Stolen DB file / backup | Key hashes need pepper; no notification content | **Subscription secrets are in the DB**: whoever has them can push to the device (with the VAPID key) or at least identify the endpoint — protect backups |

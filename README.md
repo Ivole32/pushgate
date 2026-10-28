@@ -10,7 +10,8 @@ curl -X POST https://notify.home.example/api/v1/notifications \
   -d '{"title":"Production Alert","message":"A background worker has stopped.","priority":"high"}'
 ```
 
-- One Node.js process + SQLite, behind Caddy for HTTPS. Two runtime dependencies
+- One Node.js container + SQLite, published on `127.0.0.1` only, behind your host's HTTPS
+  reverse proxy. Two runtime dependencies
   (`web-push`, `@simplewebauthn/server`), no frontend dependencies.
 - Network allowlist (CIDR) **and** a separate API key per sending service, hashed at rest.
 - Passkey-protected admin web app for devices, keys, settings, health and security events.
@@ -24,9 +25,12 @@ Contents: [Architecture](#architecture) · [Security model](#security-model) · 
 ## Architecture
 
 ```
- LAN service ─HTTPS─▶ Caddy :443 ─HTTP, internal network─▶ pushgate ─HTTPS + VAPID─▶ Apple Web Push ─▶ iPhone PWA
-                      (TLS, overwrites X-Forwarded-For)      │  SQLite (/data)
- iPhone admin ─HTTPS─▶ Caddy ─▶ pushgate  (PWA, passkey login, device + key management)
+ LAN service ─HTTPS─▶ host reverse proxy :443 ─HTTP─▶ 127.0.0.1:2580 ─▶ pushgate 172.20.2.10:8080 ─HTTPS + VAPID─▶ Apple Web Push ─▶ iPhone PWA
+                      (TLS, overwrites X-Forwarded-For)   (loopback-only publish)      │  SQLite (/data)
+ iPhone admin ─HTTPS─▶ host reverse proxy ─▶ pushgate  (PWA, passkey login, device + key management)
+
+ Docker network 172.20.2.0/24; its gateway 172.20.2.1 is how loopback-published traffic arrives
+ and is the only TRUSTED_PROXIES entry. Published ports: 127.0.0.1 only, range 2000-2999.
 ```
 
 A notification request passes, in order: client IP resolution (forwarding header only from the
@@ -39,7 +43,8 @@ is [docs/openapi.yaml](docs/openapi.yaml).
 **Technology choices.** Node.js 24 (one language for server, CLI, service worker and tests), the
 built-in `node:http` and `node:sqlite` (no web framework, no native addon), the maintained
 `web-push` library for RFC 8291/8292, `@simplewebauthn/server` for passkeys, vanilla JS for the
-PWA, Caddy for TLS, and a distroless non-root runtime image. Tradeoffs: a hand-written router and
+PWA, your existing host reverse proxy for TLS (examples for Caddy and nginx in `deploy/`), and a
+distroless non-root runtime image. Tradeoffs: a hand-written router and
 validator (small and covered by tests), and `node:sqlite` is still labelled "experimental" in
 Node 24 (its warning is suppressed; the API used here is basic and tested). A single process with
 in-memory rate limits means one instance only, which matches the use case.
@@ -55,7 +60,7 @@ in-memory rate limits means one instance only, which matches the use case.
 | **Web Push encryption** (RFC 8291 aes128gcm + VAPID) | Apple/Google/Mozilla push services and the network reading payloads | A compromised pushgate host/backend — it holds the plaintext and the VAPID key |
 | **Application-level end-to-end encryption** | — | **Not implemented.** The sender and the encrypting server are the same trust domain here, so it would add complexity without a meaningful guarantee |
 
-HTTPS (Caddy) protects requests between your services/phone and pushgate on the LAN.
+HTTPS (host reverse proxy) protects requests between your services/phone and pushgate on the LAN.
 
 ### Threat assumptions
 
@@ -77,30 +82,33 @@ HTTPS (Caddy) protects requests between your services/phone and pushgate on the 
   explicitly whether your VPN subnet belongs in `ADMIN_CIDRS` (phone management on the go) and
   keep it out of `TRUSTED_CIDRS` unless needed.
 - **Subnet overlap:** a VPN, Docker network or second router using the same private range as your
-  LAN can make foreign traffic look local. Avoid overlapping ranges; Docker's internal
-  `172.31.250.0/29` must not be in `TRUSTED_CIDRS`.
+  LAN can make foreign traffic look local. Avoid overlapping ranges; the Docker network
+  `172.20.2.0/24` must never be in `TRUSTED_CIDRS` or `ADMIN_CIDRS`.
 - **IP spoofing:** TCP makes blind spoofing of a request/response impractical, but an attacker on the
   same L2 segment (ARP spoofing) can impersonate an address. The API key still applies; TLS keeps
   it from being sniffed.
 - **Misconfigured reverse proxy:** pushgate trusts `X-Forwarded-For` only from `TRUSTED_PROXIES`
-  and only if it holds exactly one address. The shipped Caddyfile overwrites the header. If you
-  replace Caddy, your proxy **must overwrite** (not append) the header, and `TRUSTED_PROXIES` must
-  contain only the proxy's address. Never add `trusted_proxies` to the Caddyfile.
-- **Docker NAT:** with some setups (Docker Desktop, rootless Docker, IPv6 via userland proxy) the
-  client address seen behind the published port becomes a gateway address. Check "Your IP (as seen
-  by server)" on the Health card — it must show your phone's real LAN address. If it shows a
-  `172.x`/`192.168.65.x` gateway, fix the networking (on Linux: Docker Engine with iptables NAT,
-  `userland-proxy` disabled, IPv4 address in `LISTEN_ADDRESS`) instead of trusting that range.
+  (the Docker network gateway `172.20.2.1`) and only if it holds exactly one address. Your host
+  proxy **must overwrite** (not append) the header with the TCP peer address and must not itself
+  trust client-supplied forwarding headers (no `trusted_proxies` in Caddy, no `realip` module in
+  nginx). See [deploy/](deploy/).
+- **Loopback publishing:** traffic to `127.0.0.1:2580` reaches the container from the network
+  gateway, so **every process on the host** that can open that port can claim any client address
+  in `X-Forwarded-For`. The host is inside the trust boundary (see threat assumptions), and API
+  keys are still required.
+- **Verify the client address:** "Your IP (as seen by server)" on the Health card must show your
+  phone's real LAN address with "(via proxy)". If requests are refused and the logs show
+  `172.20.2.1` or another internal address, the host proxy is not setting `X-Forwarded-For`.
 
 ### Which control belongs to which layer
 
 | Layer | Control |
 |---|---|
 | Router | No port forwarding to the server. |
-| Host firewall | Allow `443/tcp` to the server only from LAN ranges that need it; allow outbound `443/tcp` (Web Push services, ACME). See [Ports and firewall](#ports-and-firewall). |
-| Docker / Compose | Caddy publishes **one** port on **one** host address (`LISTEN_ADDRESS`); the backend publishes nothing and is on an `internal` network with Caddy; non-root, read-only, no capabilities. |
-| Reverse proxy | TLS; overwrites `X-Forwarded-For`; 64 KiB request cap. |
-| Application | Fails closed on bad config; CIDR check on every request (before authentication); refuses direct (non-proxy) connections when a proxy is configured; keys, scopes, rate limits, brute-force blocks, CSRF/Origin checks, strict schemas, CSP. |
+| Host firewall | Allow the host proxy's `443/tcp` only from LAN ranges that need it; allow outbound `443/tcp` (Web Push services, ACME). See [Ports and firewall](#ports-and-firewall). |
+| Docker / Compose | One port, published on `127.0.0.1` only (range 2000-2999); one network `172.20.2.0/24` with a fixed gateway; non-root, read-only, no capabilities, `no-new-privileges`, resource limits. |
+| Host reverse proxy | TLS; overwrites `X-Forwarded-For`; 64 KiB request cap; optional IP allowlist. |
+| Application | Fails closed on bad config; CIDR check on every request (before authentication); refuses connections that do not come from the trusted proxy (the gateway); keys, scopes, rate limits, brute-force blocks, CSRF/Origin checks, strict schemas, CSP. |
 
 ### Secrets: environment variables vs. Compose secrets
 
@@ -127,8 +135,9 @@ mounted Docker socket (not used here) or a privileged container could break isol
 
 ## Setup
 
-Requirements: Linux host with Docker Engine + Compose v2, a hostname for the server on your LAN,
-outbound HTTPS from the host, and an iPhone on iOS/iPadOS **16.4 or later**.
+Requirements: Linux host with Docker Engine + Compose v2, an HTTPS reverse proxy on the host
+(Caddy, nginx, ...) with a hostname on your LAN, the Docker subnet `172.20.2.0/24` and one port in
+2000-2999 free, outbound HTTPS from the host, and an iPhone on iOS/iPadOS **16.4 or later**.
 
 ```bash
 git clone <this repository> pushgate && cd pushgate
@@ -137,7 +146,9 @@ $EDITOR .env                 # replace EVERY value, especially TRUSTED_CIDRS / A
 scripts/gen-secrets.sh       # creates secrets/api_key_pepper and secrets/vapid_private_key
 sudo chown 65532:65532 secrets/* && sudo chmod 400 secrets/*
 docker compose up -d --build
-docker compose ps            # both services should become "healthy"
+docker compose ps            # pushgate should become "healthy"
+curl -s -H "X-Forwarded-For: 192.168.1.50" http://127.0.0.1:2580/healthz   # {"status":"ok"} (use an ADMIN_CIDRS address)
+# then add the site to your host reverse proxy (deploy/Caddyfile.host or deploy/nginx-host.conf)
 ```
 
 `TRUSTED_CIDRS=192.168.1.0/24,10.0.0.0/24` in `.env.example` are **examples only**. Replace them
@@ -163,50 +174,57 @@ lists all commands.
 
 ## HTTPS and the reverse proxy
 
-Service workers, Web Push and passkeys require a secure context, so the iPhone must trust the
-server's certificate. Pick one option in [deploy/Caddyfile](deploy/Caddyfile):
+pushgate is published only on `127.0.0.1:${PUSHGATE_PORT}` (default `2580`), so LAN clients and
+the phone reach it through the reverse proxy that already runs on the host. Examples:
+[deploy/Caddyfile.host](deploy/Caddyfile.host) and [deploy/nginx-host.conf](deploy/nginx-host.conf).
+Whatever proxy you use must:
 
-1. **ACME DNS-01 (recommended).** Use a real domain you own (e.g. `notify.home.example.com`)
-   that resolves to the server's LAN IP in your local DNS. Build Caddy with your DNS provider
-   plugin (`xcaddy build --with github.com/caddy-dns/<provider>`) and use `tls { dns <provider> ... }`.
-   Publicly trusted certificate; nothing exposed to the internet.
-2. **Own certificates** issued elsewhere: mount them read-only and use `tls /certs/fullchain.pem /certs/key.pem`.
-3. **Caddy's internal CA (default in the file).** Export the root certificate and install it on the iPhone:
-   ```bash
-   docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
-   ```
-   Transfer it to the iPhone (AirDrop/Files), install it in *Settings → General → VPN & Device
-   Management*, then enable it in *Settings → General → About → Certificate Trust Settings*.
-   Trusting a private CA lets anyone holding its key impersonate any site to that phone — keep the
-   Caddy data volume protected. This project's tests do not cover Web Push with a user-installed
-   root; if registration fails, use option 1.
+1. terminate TLS with a certificate the iPhone trusts (service workers, Web Push and passkeys
+   require a secure context);
+2. forward to `http://127.0.0.1:2580` and **overwrite** `X-Forwarded-For` with the TCP peer
+   address (Caddy: `header_up X-Forwarded-For {remote_host}`; nginx:
+   `proxy_set_header X-Forwarded-For $remote_addr;`), and drop `Forwarded`/`X-Real-IP`;
+3. not trust forwarding headers from its own clients.
+
+pushgate accepts forwarded requests only from the Docker network gateway `172.20.2.1`
+(`TRUSTED_PROXIES`, set in `compose.yaml`), requires exactly one address in the header, and then
+checks that address against `TRUSTED_CIDRS` / `ADMIN_CIDRS`. Requests without the header are refused.
+
+Certificate options:
+
+1. **ACME DNS-01 (recommended).** A real domain you own (e.g. `notify.home.example.com`) that
+   resolves to the server's LAN IP in your local DNS; Caddy needs a build with your DNS provider
+   plugin, nginx users can use certbot/acme.sh with a DNS plugin. Publicly trusted; nothing exposed.
+2. **Own certificates** issued elsewhere.
+3. **Private CA** (e.g. Caddy `tls internal`). Install the root certificate on the iPhone in
+   *Settings → General → VPN & Device Management*, then enable full trust in *Settings → General →
+   About → Certificate Trust Settings*. Trusting a private CA lets anyone holding its key
+   impersonate any site to that phone. This project's tests do not cover Web Push with a
+   user-installed root; if registration fails, use option 1.
 
 `PUBLIC_ORIGIN` must exactly match the URL you open on the phone (scheme, host, and port if not
 443); passkeys are bound to that hostname.
 
-If you use another proxy (nginx, Traefik), it must (a) terminate TLS, (b) **overwrite**
-`X-Forwarded-For` with the client address (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`),
-(c) be the only address in `TRUSTED_PROXIES`, and (d) be the only way to reach the backend.
-
 ### Ports and firewall
 
-| Port | Direction | Purpose |
+| Port | Bound to | Purpose |
 |---|---|---|
-| 443/tcp on `LISTEN_ADDRESS` | inbound from LAN | Caddy (API, PWA, admin) |
-| 8080/tcp | internal Docker network only | pushgate backend — **never published** |
-| 443/tcp | outbound | Apple/Google/Mozilla push services; ACME if used |
+| `2580/tcp` (`PUSHGATE_PORT`, 2000-2999) | `127.0.0.1` only | pushgate, for the host reverse proxy |
+| 8080/tcp | container only (`172.20.2.10`) | pushgate inside the Docker network, not published |
+| 443/tcp (your proxy) | host LAN address | host reverse proxy (API, PWA, admin) |
+| 443/tcp outbound | — | Apple/Google/Mozilla push services; ACME if used |
 
-Docker-published ports bypass `ufw`/`INPUT` rules. Restrict them in the `DOCKER-USER` chain, e.g.:
+Because the container port is published on loopback only, no `DOCKER-USER` rules are needed for
+it. Restrict the host proxy's `443/tcp` with your normal host firewall (e.g.
+`ufw allow from 192.168.1.0/24 to any port 443 proto tcp`), and never forward it on the router.
 
-```bash
-# allow LAN ranges to reach published container ports, drop everything else from the LAN interface
-sudo iptables -I DOCKER-USER -i eth0 -j DROP
-sudo iptables -I DOCKER-USER -i eth0 -s 192.168.1.0/24 -p tcp --dport 443 -j RETURN
-sudo iptables -I DOCKER-USER -i eth0 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-```
+### Docker network
 
-(Persist with your distribution's mechanism; adapt interface and ranges.) Binding to
-`LISTEN_ADDRESS` already keeps the port off other interfaces.
+All Docker addresses come from `172.20.2.0/24` (network `pushgate`, gateway `172.20.2.1`,
+container `172.20.2.10`). They are set in `compose.yaml` and can be overridden with
+`PUSHGATE_SUBNET`, `PUSHGATE_GATEWAY` and `PUSHGATE_IP` in `.env` (the gateway override also
+changes `TRUSTED_PROXIES`). Compose refuses to start if another Docker network already uses an
+overlapping range.
 
 ## iPhone installation
 
@@ -358,7 +376,7 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
 ```bash
 npm ci
 node src/cli.js gen-secrets --out .dev/secrets
-npm run dev            # http://localhost:8080 with .env.development (localhost-only CIDRs)
+npm run dev            # http://localhost:2090 with .env.development (localhost-only CIDRs)
 node --env-file=.env.development src/cli.js enroll-token
 ```
 
@@ -371,7 +389,8 @@ CSP, cookies) are identical to production.
 npm run lint
 npm test                  # unit + HTTP security tests (node:test)
 npm run audit             # npm audit, production dependencies
-npm run test:container    # builds and runs the real compose stack: hardening, TLS proxy, restart, recreation
+npm run test:container    # builds and runs the real compose stack: hardening, loopback port range,
+                          # trusted-proxy handling, restart, recreation
 npm run scan:image        # npm audit + Trivy scan of the image (fails on HIGH/CRITICAL)
 ```
 

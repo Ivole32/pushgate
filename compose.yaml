@@ -1,15 +1,14 @@
-# Production deployment: pushgate (app) behind Caddy (TLS + forwarding header normalisation).
+# Production deployment of pushgate behind the host's own HTTPS reverse proxy.
 #
 # Required before the first start (see README):
 #   - .env              copied from .env.example and edited
 #   - secrets/api_key_pepper, secrets/vapid_private_key  (scripts/gen-secrets.sh)
 #
-# Network layout:
-#   edge   (bridge)            Caddy's published port; ACME/outbound for Caddy
-#   proxy  (internal, no NAT)  Caddy 172.31.250.2  <->  pushgate 172.31.250.3
-#   egress (bridge)            pushgate -> Web Push services (outbound HTTPS only; no published ports)
-# If 172.31.250.0/29 collides with one of your networks, change it here AND in TRUSTED_PROXIES
-# and in deploy/Caddyfile.
+# Network layout (deployment constraints: one Docker subnet, ports 2000-2999, loopback only):
+#   host reverse proxy (TLS, :443 on the LAN)  ->  127.0.0.1:${PUSHGATE_PORT}  ->  pushgate:8080
+#   Docker network "pushgate" = 172.20.2.0/24, gateway 172.20.2.1, pushgate 172.20.2.10
+#   Connections arriving through the loopback-published port reach the container from the
+#   network gateway, so the gateway address is the only trusted proxy.
 name: pushgate
 
 services:
@@ -31,16 +30,18 @@ services:
       DATA_DIR: /data
       API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
       VAPID_PRIVATE_KEY_FILE: /run/secrets/vapid_private_key
-      # Only Caddy may forward requests; everything else connecting directly is refused.
-      TRUSTED_PROXIES: 172.31.250.2/32
+      # Only the host reverse proxy (arriving via the network gateway) may forward requests;
+      # direct connections from other containers on the network are refused.
+      TRUSTED_PROXIES: ${PUSHGATE_GATEWAY:-172.20.2.1}/32
     secrets: [api_key_pepper, vapid_private_key]
     volumes:
       - pushgate-data:/data
     networks:
-      proxy:
-        ipv4_address: 172.31.250.3
-      egress: {}
-    # Deliberately no "ports:" — the backend is not published on any host interface.
+      pushgate:
+        ipv4_address: ${PUSHGATE_IP:-172.20.2.10}
+    ports:
+      # Loopback only, port in the 2000-2999 range. Never publish on 0.0.0.0.
+      - "127.0.0.1:${PUSHGATE_PORT:-2580}:8080"
     healthcheck:
       test: ["CMD", "/nodejs/bin/node", "src/healthcheck.js"]
       interval: 30s
@@ -55,51 +56,16 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
-  caddy:
-    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    cap_add: [NET_BIND_SERVICE]
-    security_opt: ["no-new-privileges:true"]
-    tmpfs:
-      - /tmp:size=8m,noexec,nosuid,nodev
-    environment:
-      PUSHGATE_HOSTNAME: ${PUSHGATE_HOSTNAME:?set PUSHGATE_HOSTNAME in .env}
-    ports:
-      # Bind to ONE LAN address of the host, never 0.0.0.0 by accident.
-      - "${LISTEN_ADDRESS:?set LISTEN_ADDRESS in .env}:${HTTPS_PORT:-443}:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    networks:
-      proxy:
-        ipv4_address: 172.31.250.2
-      edge: {}
-    depends_on:
-      pushgate:
-        condition: service_healthy
-    mem_limit: 128m
-    cpus: 0.5
-    pids_limit: 64
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-
 networks:
-  proxy:
-    internal: true
+  pushgate:
+    # Not "internal": pushgate needs outbound HTTPS to the Web Push services.
     ipam:
       config:
-        - subnet: 172.31.250.0/29
-  egress: {}
-  edge: {}
+        - subnet: ${PUSHGATE_SUBNET:-172.20.2.0/24}
+          gateway: ${PUSHGATE_GATEWAY:-172.20.2.1}
 
 volumes:
   pushgate-data: {}
-  caddy-data: {}
-  caddy-config: {}
 
 secrets:
   api_key_pepper:

@@ -1,0 +1,29 @@
+# Site block for a Caddy instance running on the HOST (not in Docker), in front of pushgate
+# published on 127.0.0.1:2580. Merge it into your existing Caddyfile.
+#
+# Do NOT configure `trusted_proxies` for this site: Caddy is the first hop, so client-supplied
+# forwarding headers must never be trusted. Without it, {remote_host} is the TCP peer.
+
+notify.home.example {
+	# Pick one TLS option:
+	#   tls internal                                   Caddy's own CA (install its root on the iPhone)
+	#   tls /etc/ssl/pushgate/fullchain.pem /etc/ssl/pushgate/key.pem
+	#   tls { dns <provider> ... }                      ACME DNS-01 (Caddy build with the DNS plugin)
+	tls internal
+
+	# Optional: restrict who can reach this site at all (pushgate enforces its own CIDRs too).
+	# @outside not remote_ip 192.168.1.0/24
+	# respond @outside 403
+
+	request_body {
+		max_size 64KB
+	}
+
+	reverse_proxy 127.0.0.1:2580 {
+		# Overwrite (not append) the forwarding header with the TCP peer address. pushgate accepts
+		# exactly one address in this header, and only from the Docker network gateway.
+		header_up X-Forwarded-For {remote_host}
+		header_up -Forwarded
+		header_up -X-Real-IP
+	}
+}
