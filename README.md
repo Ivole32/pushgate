@@ -1,7 +1,6 @@
 # Pushgate
 
-A small, self-hosted gateway that lets services on your local network send push notifications to
-your iPhone through a Home Screen web app (PWA) and standard Web Push. No native app, no email, no
+A small, self-hosted gateway that lets your services send push notifications to your iPhone through a Home Screen web app (PWA) and standard Web Push. No native app, no email, no
 third-party notification app.
 
 ```bash
@@ -14,13 +13,138 @@ curl -X POST https://notify.home.example/api/v1/notifications \
   reverse proxy. Two runtime dependencies
   (`web-push`, `@simplewebauthn/server`), no frontend dependencies.
 - Network allowlist (CIDR) **and** a separate API key per sending service, hashed at rest.
-- Passkey-protected admin web app for devices, keys, settings, health and security events.
+- Passkey-protected admin web app, reachable from any network by default, for devices, keys,
+  settings, health and security events. See [How it is secured](#how-it-is-secured).
 - Notification contents are never stored; logs never contain keys, bodies or subscription data.
 
-Contents: [Architecture](#architecture) · [Security model](#security-model) · [Setup](#setup) ·
+Contents: [Setup](#setup) · [How it is secured](#how-it-is-secured) · [Architecture](#architecture) · [Security model](#security-model) ·
 [HTTPS](#https-and-the-reverse-proxy) · [iPhone](#iphone-installation) · [API keys](#api-keys) ·
 [Sending](#sending-notifications) · [Operations](#operations) · [Troubleshooting](#troubleshooting-ios-delivery) ·
 [Limitations](#known-limitations) · [Development](#development)
+
+## Setup
+
+The default setup: pushgate runs on a server with a public DNS name, you can open the web app and
+set up your iPhone **from any network** (no VPN), and only the services you list may send
+notifications. Receiving notifications never needs any of this: Apple delivers them to the phone
+wherever it is.
+
+**You need:** a Linux server with Docker Engine + Compose v2 and nginx (or Caddy) on the host; a
+DNS name pointing at the server (e.g. `notify.example.com`); ports 80/443 reachable for the
+certificate and the web app; the Docker subnet `172.20.2.0/24` and one port in 2000-2999 free;
+an iPhone on iOS/iPadOS **16.4 or later**.
+
+### 1. Install and configure
+
+```bash
+git clone <this repository> pushgate && cd pushgate
+cp .env.example .env
+$EDITOR .env
+```
+
+In `.env` set at least:
+
+| Setting | Value |
+|---|---|
+| `PUBLIC_ORIGIN` | `https://notify.example.com` (your DNS name, exactly as you will open it) |
+| `ADMIN_PUBLIC` | `true` (already the default): web app reachable from any network |
+| `TRUSTED_CIDRS` | where your *sending* services connect from, e.g. `203.0.113.7/32`. See the comments in `.env.example`; unsure? Start with your best guess and read the refused address from *Security events* later |
+| `VAPID_SUBJECT` | `mailto:you@example.com` (Apple requires a real contact) |
+
+### 2. Create the secrets and start
+
+```bash
+scripts/gen-secrets.sh          # secrets/ (0700) with api_key_pepper + vapid_private_key (0444)
+docker compose up -d --build
+docker compose ps               # pushgate becomes "healthy"
+```
+
+### 3. HTTPS in front of it
+
+```bash
+certbot --nginx -d notify.example.com     # publicly trusted certificate
+```
+
+Then copy the `server { ... }` block and the `limit_req_zone` line from
+[deploy/nginx-host.conf](deploy/nginx-host.conf) into your nginx site (adjust `server_name` and
+the certificate paths) and reload: `nginx -t && systemctl reload nginx`. Caddy users: see
+[deploy/Caddyfile.host](deploy/Caddyfile.host). Check `https://notify.example.com` loads the app.
+
+### 4. Create the administrator passkey (one-time token)
+
+There are no default passwords and no open setup page. On the server:
+
+```bash
+docker compose exec pushgate /nodejs/bin/node src/cli.js enroll-token
+```
+
+This prints a token valid for 15 minutes and for one use. Then on the iPhone (any network):
+
+1. Open `https://notify.example.com` in **Safari** → Share → **Add to Home Screen** → Add.
+   (Web Push on iOS only works in Home Screen web apps, iOS 16.4+.)
+2. Open **Pushgate from the Home Screen icon**.
+3. **Set up with enrollment token**: paste the token, tap **Create passkey**, confirm with Face ID.
+   The passkey is stored in your iCloud Keychain; from now on you sign in with Face ID.
+4. Under **This device** tap **Enable notifications on this device** and allow notifications.
+5. Tap **Send test notification**.
+
+### 5. Connect your services
+
+In the app, **Service API keys → Create key** (one per service); copy the key, it is shown once.
+Use it as in [Sending notifications](#sending-notifications). If a sender gets `403`, its address
+is not in `TRUSTED_CIDRS`: the app's *Security events* list shows it as `network.rejected`
+(zone `api`) with the address to add. Edit `.env`, then `docker compose up -d`.
+
+Tip: `alias pg-cli='docker compose --project-directory ~/pushgate exec pushgate /nodejs/bin/node src/cli.js'`
+lets you run `pg-cli enroll-token`, `pg-cli keys list`, ... from any directory.
+
+### Restricting the web app to your own networks instead
+
+If you prefer the web app to be reachable only from home or a VPN, replace `ADMIN_PUBLIC=true`
+with `ADMIN_CIDRS=<networks>` (e.g. `192.168.1.0/24,10.8.0.0/24`). pushgate refuses to start if
+neither or both are set, so the choice is always explicit.
+
+## How it is secured
+
+In plain terms, here is what an attacker on the internet runs into, from the outside in.
+
+**The sending API is not public.** Only addresses in `TRUSTED_CIDRS` can even reach
+`/api/v1/notifications`; everything else is refused before an API key is looked at. On top of
+that every service needs its own key (256 random bits, stored only as a keyed hash, revocable
+individually), with rate limits and temporary blocks after failed attempts. `0.0.0.0/0` is refused
+in every setting, so the API cannot be opened to everyone by mistake.
+
+**The web app is public, but useless without your passkey.**
+
+- *Login* uses passkeys only: no passwords that could be guessed, phished or leaked. A passkey
+  is a key pair; the private half never leaves your iPhone/iCloud Keychain, and it only works on
+  your exact domain, so a look-alike phishing site gets nothing.
+- *Creating the first passkey* (or a recovery passkey) requires a one-time token that can only be
+  created on the server's command line, expires after 15 minutes and works once. Someone who finds
+  your site cannot register their own passkey.
+- *Sessions* after login live in a cookie the page's scripts cannot read (`HttpOnly`), that is only
+  sent over HTTPS to your exact host (`__Host-`, `Secure`) and never with requests started by
+  other sites (`SameSite=Strict`). Every change additionally needs a per-session token and a
+  matching `Origin`, which blocks cross-site request forgery. Sessions expire after 30 minutes idle
+  and 12 hours at most.
+- *Login challenges* (the random value your passkey signs) are signed tokens rather than server
+  memory, so floods of login requests cannot fill a table and block your own sign-in; each
+  challenge works once and for 5 minutes.
+- *Abuse limits*: login and enrollment endpoints are rate limited per client inside the app
+  (`RATE_LIMIT_ADMIN_ANONYMOUS_PER_MINUTE`, default 30) and in the nginx example; repeated failures
+  block the client temporarily.
+- *Browser hardening*: a strict Content Security Policy (only the app's own scripts can run),
+  everything is shown as text and never as HTML, no third-party resources, and a `noindex` header
+  keeps search engines away.
+
+**What a stranger can still see:** that a Pushgate login page exists at your address, and its
+static files (HTML/JS/CSS, which contain no secrets). They cannot list keys, devices or events,
+send notifications, or register a device without logging in.
+
+**What this does not protect against:** someone who controls the server itself (they can read the
+secrets and send anything), someone who has your unlocked iPhone with the passkey, and a large
+denial-of-service attack (that is your hosting provider's / a CDN's job). The code has thorough
+automated security tests but no external audit.
 
 ## Architecture
 
@@ -55,7 +179,7 @@ in-memory rate limits means one instance only, which matches the use case.
 
 | Mechanism | Protects against | Does **not** protect against |
 |---|---|---|
-| **Network access control** (`TRUSTED_CIDRS`, `ADMIN_CIDRS`, firewall, bound interface) | Anything outside your LAN reaching the API or UI | Any host *inside* the allowed range — a private IP is not proof of trust |
+| **Network access control** (`TRUSTED_CIDRS` for sending; optional `ADMIN_CIDRS`; loopback-only publish) | Anyone outside the listed addresses reaching the sending API (and the web app, if `ADMIN_CIDRS` is used) | Any host *inside* the allowed range — a private IP is not proof of trust |
 | **Authentication** (per-service API key; passkeys for the admin) | Hosts on the LAN that do not hold a key; one service acting as another | A compromised service using *its own* key until you revoke it |
 | **Web Push encryption** (RFC 8291 aes128gcm + VAPID) | Apple/Google/Mozilla push services and the network reading payloads | A compromised pushgate host/backend — it holds the plaintext and the VAPID key |
 | **Application-level end-to-end encryption** | — | **Not implemented.** The sender and the encrypting server are the same trust domain here, so it would add complexity without a meaningful guarantee |
@@ -143,53 +267,14 @@ Verification uses a public key id for lookup and `crypto.timingSafeEqual` for co
 Containers are one layer, not a complete security boundary: a kernel or Docker vulnerability, a
 mounted Docker socket (not used here) or a privileged container could break isolation.
 
-## Setup
-
-Requirements: Linux host with Docker Engine + Compose v2, an HTTPS reverse proxy on the host
-(Caddy, nginx, ...) with a hostname on your LAN, the Docker subnet `172.20.2.0/24` and one port in
-2000-2999 free, outbound HTTPS from the host, and an iPhone on iOS/iPadOS **16.4 or later**.
-
-```bash
-git clone <this repository> pushgate && cd pushgate
-cp .env.example .env
-$EDITOR .env                 # replace EVERY value, especially TRUSTED_CIDRS / ADMIN_CIDRS
-scripts/gen-secrets.sh       # creates secrets/ (0700) with api_key_pepper and vapid_private_key (0444)
-docker compose up -d --build
-docker compose ps            # pushgate should become "healthy"
-curl -s -H "X-Forwarded-For: 192.168.1.50" http://127.0.0.1:2580/healthz   # {"status":"ok"} (use an ADMIN_CIDRS address)
-# then add the site to your host reverse proxy (deploy/Caddyfile.host or deploy/nginx-host.conf)
-```
-
-`TRUSTED_CIDRS=192.168.1.0/24,10.0.0.0/24` in `.env.example` are **examples only**. Replace them
-with your actual, narrowest possible ranges. Pushgate refuses to start if `TRUSTED_CIDRS` or
-`ADMIN_CIDRS` is missing, invalid, contains host bits, or contains `/0`.
-
-### Initial administrator (one-time token)
-
-There are no default credentials and no open setup endpoint. On the server:
-
-```bash
-docker compose exec pushgate /nodejs/bin/node src/cli.js enroll-token
-```
-
-This prints a one-time token valid for 15 minutes (stored only as a hash). Open the app on the
-iPhone (ideally already from the Home Screen, see below), use **Set up with enrollment token**,
-paste the token and create a passkey (stored in iCloud Keychain). The token is consumed atomically
-with the passkey registration. Until an administrator exists, the sending API answers `503`
-(`REQUIRE_SETUP_BEFORE_SENDING=true`).
-
-Tip: `alias pg-cli='docker compose exec pushgate /nodejs/bin/node src/cli.js'` — `pg-cli --help`
-lists all commands.
-
 ## HTTPS and the reverse proxy
 
-pushgate is published only on `127.0.0.1:${PUSHGATE_PORT}` (default `2580`), so LAN clients and
-the phone reach it through the reverse proxy that already runs on the host. Examples:
-[deploy/Caddyfile.host](deploy/Caddyfile.host) and [deploy/nginx-host.conf](deploy/nginx-host.conf).
-Whatever proxy you use must:
+pushgate is published only on `127.0.0.1:${PUSHGATE_PORT}` (default `2580`), so all traffic goes
+through the reverse proxy on the host. Examples: [deploy/nginx-host.conf](deploy/nginx-host.conf)
+and [deploy/Caddyfile.host](deploy/Caddyfile.host). Whatever proxy you use must:
 
 1. terminate TLS with a certificate the iPhone trusts (service workers, Web Push and passkeys
-   require a secure context);
+   require a secure context; Let's Encrypt is ideal);
 2. forward to `http://127.0.0.1:2580` and **overwrite** `X-Forwarded-For` with the TCP peer
    address (Caddy: `header_up X-Forwarded-For {remote_host}`; nginx:
    `proxy_set_header X-Forwarded-For $remote_addr;`), and drop `Forwarded`/`X-Real-IP`;
@@ -197,19 +282,13 @@ Whatever proxy you use must:
 
 pushgate accepts forwarded requests only from the Docker network gateway `172.20.2.1`
 (`TRUSTED_PROXIES`, set in `compose.yaml`), requires exactly one address in the header, and then
-checks that address against `TRUSTED_CIDRS` / `ADMIN_CIDRS`. Requests without the header are refused.
+checks that address against `TRUSTED_CIDRS` (and `ADMIN_CIDRS` if you use it). Requests without
+the header are refused.
 
-Certificate options:
-
-1. **ACME DNS-01 (recommended).** A real domain you own (e.g. `notify.home.example.com`) that
-   resolves to the server's LAN IP in your local DNS; Caddy needs a build with your DNS provider
-   plugin, nginx users can use certbot/acme.sh with a DNS plugin. Publicly trusted; nothing exposed.
-2. **Own certificates** issued elsewhere.
-3. **Private CA** (e.g. Caddy `tls internal`). Install the root certificate on the iPhone in
-   *Settings → General → VPN & Device Management*, then enable full trust in *Settings → General →
-   About → Certificate Trust Settings*. Trusting a private CA lets anyone holding its key
-   impersonate any site to that phone. This project's tests do not cover Web Push with a
-   user-installed root; if registration fails, use option 1.
+For a server that is *not* reachable from the internet (LAN only), use a certificate from ACME
+DNS-01 or your own CA; with a private CA, install its root on the iPhone (*Settings → General →
+VPN & Device Management*, then enable full trust in *Settings → General → About → Certificate
+Trust Settings*). This project's tests do not cover Web Push with a user-installed root.
 
 `PUBLIC_ORIGIN` must exactly match the URL you open on the phone (scheme, host, and port if not
 443); passkeys are bound to that hostname.
@@ -220,12 +299,12 @@ Certificate options:
 |---|---|---|
 | `2580/tcp` (`PUSHGATE_PORT`, 2000-2999) | `127.0.0.1` only | pushgate, for the host reverse proxy |
 | 8080/tcp | container only (`172.20.2.10`) | pushgate inside the Docker network, not published |
-| 443/tcp (your proxy) | host LAN address | host reverse proxy (API, PWA, admin) |
-| 443/tcp outbound | — | Apple/Google/Mozilla push services; ACME if used |
+| 443/tcp (and 80 for certbot) | host public address | host reverse proxy (web app, API) |
+| 443/tcp outbound | — | Apple/Google/Mozilla push services; ACME |
 
 Because the container port is published on loopback only, no `DOCKER-USER` rules are needed for
-it. Restrict the host proxy's `443/tcp` with your normal host firewall (e.g.
-`ufw allow from 192.168.1.0/24 to any port 443 proto tcp`), and never forward it on the router.
+it. With `ADMIN_CIDRS` instead of `ADMIN_PUBLIC`, you can additionally restrict `443/tcp` in the
+host firewall (e.g. `ufw allow from 192.168.1.0/24 to any port 443 proto tcp`).
 
 ### Docker network
 
@@ -235,44 +314,13 @@ container `172.20.2.10`). They are set in `compose.yaml` and can be overridden w
 changes `TRUSTED_PROXIES`). Compose refuses to start if another Docker network already uses an
 overlapping range.
 
-### Public admin access
-
-Receiving notifications never needs inbound access: they reach the phone through Apple's push
-service wherever it is. Only *opening the web app* (enrollment, enabling notifications, managing
-keys and devices) needs to reach the server. To allow that from anywhere without a VPN:
-
-1. Serve a public DNS name with a publicly trusted certificate (e.g. `certbot --nginx -d
-   notify.example.com`) and set `PUBLIC_ORIGIN=https://notify.example.com`.
-2. In `.env`, remove `ADMIN_CIDRS` and set `ADMIN_PUBLIC=true`. Keep `TRUSTED_CIDRS` as narrow as
-   before: the sending API stays restricted (list your senders' addresses, e.g. the server's own
-   public IP `/32` for services on the same host that call the public URL).
-3. Use the rate-limited `/admin/api/` location from [deploy/nginx-host.conf](deploy/nginx-host.conf).
-4. `docker compose up -d --force-recreate`. The log shows `admin_cidrs: "PUBLIC (ADMIN_PUBLIC=true)"`.
-
-What protects the public admin surface: passkey-only login (phishing-resistant, no passwords),
-enrollment only with a 15-minute one-time token from the CLI, single-use WebAuthn challenges with
-per-client caps, per-client brute-force blocks, `__Host-` SameSite=Strict session cookies with
-CSRF tokens and Origin checks, strict CSP. Residual risks: anyone can see that a Pushgate instance
-exists and load its static files; a distributed flood from many addresses can exhaust the global
-challenge table (1000 pending) and delay your login by up to 5 minutes; and the code has not had
-an external audit for internet exposure. `0.0.0.0/0` and `::/0` remain invalid in every CIDR
-setting, so the sending API cannot be made public by accident.
-
 ## iPhone installation
 
 Web Push on iOS works **only** for web apps added to the Home Screen, on iOS/iPadOS 16.4+.
-It does not work in a normal Safari tab.
-
-1. Open `PUBLIC_ORIGIN` in Safari (on the network allowed by `ADMIN_CIDRS`).
-2. Share → **Add to Home Screen** → Add. Open Pushgate from the new icon.
-3. Sign in with the passkey (or enroll, see above).
-4. Under **This device**, tap **Enable notifications on this device** and allow notifications when
-   iOS asks. The prompt only appears after a tap; if you dismiss it, re-enable in *Settings →
-   Notifications → Pushgate*.
-5. Tap **Send test notification**.
-
-The phone does not need to be on the LAN to *receive* notifications (they come via Apple), only to
-manage the app. Each device can set a minimum priority (e.g. only `high`).
+It does not work in a normal Safari tab. Step-by-step: [Setup, step 4](#4-create-the-administrator-passkey-one-time-token).
+Notification permission is only requested after you tap **Enable notifications**; if you dismissed
+the prompt, re-enable it in *Settings → Notifications → Pushgate*. Each device can set a minimum
+priority (e.g. only `high`).
 
 ## API keys
 

@@ -56,9 +56,7 @@ export function createAdminRoutes({ config, db, keys, devices, pusher, auth, aud
     }
   }
 
-  // Options endpoints: null means the client already has too many outstanding challenges.
   function challengeResponse(result) {
-    if (!result) throw errors.rateLimited(60);
     return { challenge_id: result.challengeId, options: result.options };
   }
 
@@ -94,7 +92,7 @@ export function createAdminRoutes({ config, db, keys, devices, pusher, auth, aud
         audit.recordThrottled('admin.enroll_failed', { ip: client.ip, detail: { reason: 'invalid_token' } });
         throw errors.unauthorized();
       }
-      return challengeResponse(await auth.registrationOptions('enroll', clientKey(client.ip)));
+      return challengeResponse(await auth.registrationOptions('enroll'));
     }],
     ['POST', /^\/admin\/api\/enroll\/verify$/, { auth: false }, async ({ req, res, client }) => {
       checkBlocked(client.ip);
@@ -111,7 +109,7 @@ export function createAdminRoutes({ config, db, keys, devices, pusher, auth, aud
     // ---- login ----
     ['POST', /^\/admin\/api\/login\/options$/, { auth: false }, async ({ client }) => {
       checkBlocked(client.ip);
-      return challengeResponse(await auth.authenticationOptions(clientKey(client.ip)));
+      return challengeResponse(await auth.authenticationOptions());
     }],
     ['POST', /^\/admin\/api\/login\/verify$/, { auth: false }, async ({ req, res, client }) => {
       checkBlocked(client.ip);
@@ -237,9 +235,7 @@ export function createAdminRoutes({ config, db, keys, devices, pusher, auth, aud
     ['GET', /^\/admin\/api\/passkeys$/, {}, ({ session }) => ({
       passkeys: auth.listPasskeys().map((p) => ({ ...p, current: p.id === session.passkeyId })),
     })],
-    ['POST', /^\/admin\/api\/passkeys\/options$/, {}, async ({ client }) => {
-      return challengeResponse(await auth.registrationOptions('add', clientKey(client.ip)));
-    }],
+    ['POST', /^\/admin\/api\/passkeys\/options$/, {}, async () => challengeResponse(await auth.registrationOptions('add'))],
     ['POST', /^\/admin\/api\/passkeys\/verify$/, {}, async ({ req, client }) => {
       const data = await body(req, schemas.addPasskeyVerify);
       const result = await auth.verifyRegistration({ kind: 'add', challengeId: data.challenge_id, response: data.response, name: data.name });
@@ -270,6 +266,15 @@ export function createAdminRoutes({ config, db, keys, devices, pusher, auth, aud
     if (!route) throw errors.methodNotAllowed();
     const [, re, opts, handler] = route;
     if (req.method !== 'GET') requireSameOrigin(req);
+    if (opts.auth === false) {
+      // Endpoints anyone can call (session check, login, enrollment) are rate limited per client
+      // inside the app, independent of any reverse proxy configuration.
+      const wait = limits.adminAnonymous.take(clientKey(client.ip));
+      if (wait) {
+        audit.recordThrottled('rate_limited', { ip: client.ip, detail: { limit: 'admin_anonymous' } });
+        throw errors.rateLimited(wait);
+      }
+    }
     const session = opts.auth === false ? null : requireSession(req, client);
     const params = re.exec(url.pathname).slice(1).map((p) => {
       try {

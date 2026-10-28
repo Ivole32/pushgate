@@ -11,21 +11,27 @@ import {
   verifyAuthenticationResponse,
 } from '@simplewebauthn/server';
 import { getSetting, setSetting, transaction } from '../db.js';
+import { CHALLENGE_TOKEN_PATTERN } from '../validate.js';
 
 export const SESSION_COOKIE = '__Host-pushgate_session';
 export const ENROLLMENT_TOKEN_TTL_MS = 15 * 60 * 1000;
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
-const MAX_CHALLENGES = 1000;
-const MAX_CHALLENGES_PER_CLIENT = 5;
 const ENROLLMENT_PATTERN = /^pge_[A-Za-z0-9_-]{43}$/;
 const SESSION_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 
 export function createAdminAuth({ db, config, now = () => Date.now() }) {
-  const challenges = new Map();
   const origin = config.publicOrigin;
   const rpID = config.rpId;
+  // WebAuthn challenges are stateless signed tokens: the server keeps nothing for a challenge it
+  // hands out, so anonymous clients (with ADMIN_PUBLIC on: the whole internet) cannot fill a
+  // table and block the administrator's sign-in. The key is random per process: challenges live
+  // only 5 minutes, and a restart must invalidate them (the used-challenge set below is in memory).
+  const challengeKey = crypto.randomBytes(32);
+  // Challenges that completed a successful ceremony, kept until they expire, so each one can be
+  // used only once. Only successful verifications add entries, so this stays tiny.
+  const usedChallenges = new Map();
 
   function userId() {
     let id = getSetting(db, 'webauthn_user_id');
@@ -58,32 +64,51 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
 
   // ---- challenges ----------------------------------------------------------------------
 
-  // Outstanding challenges are capped per client and globally. When a cap is reached new
-  // requests are refused instead of evicting existing challenges, so a flood from one client
-  // cannot cancel another client's (the administrator's) sign-in in progress.
-  function storeChallenge(kind, challenge, client) {
-    const t = now();
-    for (const [id, c] of challenges) if (c.expires <= t) challenges.delete(id);
-    let mine = 0;
-    for (const c of challenges.values()) if (c.client === client) mine++;
-    if (mine >= MAX_CHALLENGES_PER_CLIENT || challenges.size >= MAX_CHALLENGES) return null;
-    const id = crypto.randomBytes(16).toString('base64url');
-    challenges.set(id, { kind, challenge, client, expires: t + CHALLENGE_TTL_MS });
-    return id;
+  const mac = (payload) => crypto.createHmac('sha256', challengeKey).update(payload).digest('base64url');
+
+  // Token = base64url(JSON {k: kind, c: challenge, e: expiry}) "." HMAC. Binding the kind stops a
+  // login challenge from being used for enrollment and vice versa.
+  function issueChallenge(kind, challenge) {
+    const payload = Buffer.from(JSON.stringify({ k: kind, c: challenge, e: now() + CHALLENGE_TTL_MS })).toString('base64url');
+    return `${payload}.${mac(payload)}`;
   }
 
-  // Challenges are single use: they are removed on the first verification attempt.
-  function takeChallenge(id, kind) {
-    const c = challenges.get(id);
-    challenges.delete(id);
-    if (!c || c.kind !== kind || c.expires <= now()) return null;
-    return c;
+  // Returns the challenge string, or null if the token is forged, expired, of another kind or
+  // already used.
+  function openChallenge(token, kind) {
+    if (typeof token !== 'string' || !CHALLENGE_TOKEN_PATTERN.test(token)) return null;
+    const [payload, tag] = token.split('.');
+    const expected = Buffer.from(mac(payload));
+    const given = Buffer.from(tag);
+    if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return null;
+    let data;
+    try {
+      data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    } catch {
+      return null;
+    }
+    if (data?.k !== kind || typeof data.c !== 'string' || !Number.isSafeInteger(data.e) || data.e <= now()) return null;
+    if (usedChallenges.has(data.c)) return null;
+    return { challenge: data.c, expires: data.e };
+  }
+
+  // Marks a challenge as used. Called synchronously after verification succeeded: there is no
+  // await between this check and the insert, so two concurrent submissions of the same
+  // successful response cannot both win.
+  function consumeChallenge(c) {
+    const t = now();
+    // Re-check expiry: it may have passed during verification, and pruning below would otherwise
+    // drop the record of an earlier successful use of this same challenge.
+    if (c.expires <= t) return false;
+    for (const [k, exp] of usedChallenges) if (exp <= t) usedChallenges.delete(k);
+    if (usedChallenges.has(c.challenge)) return false;
+    usedChallenges.set(c.challenge, c.expires);
+    return true;
   }
 
   // ---- registration (enrollment and adding passkeys) ------------------------------------
 
-  // Returns null when the client has too many outstanding challenges.
-  async function registrationOptions(kind, client) {
+  async function registrationOptions(kind) {
     const existing = db.prepare('SELECT id, transports FROM passkeys').all();
     const options = await generateRegistrationOptions({
       rpName: 'Pushgate',
@@ -96,14 +121,13 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
       authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
       supportedAlgorithmIDs: [-7, -257],
     });
-    const challengeId = storeChallenge(kind, options.challenge, client);
-    return challengeId ? { challengeId, options } : null;
+    return { challengeId: issueChallenge(kind, options.challenge), options };
   }
 
-  // Returns { id } or { error: 'challenge' } (unknown/expired/used challenge, not counted as a
+  // Returns { id } or { error: 'challenge' } (forged/expired/used challenge, not counted as a
   // credential failure) or { error: 'invalid' }.
   async function verifyRegistration({ kind, challengeId, response, name, token = null }) {
-    const c = takeChallenge(challengeId, kind);
+    const c = openChallenge(challengeId, kind);
     if (!c) return { error: 'challenge' };
     let result;
     try {
@@ -118,6 +142,7 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
       return { error: 'invalid' };
     }
     if (!result.verified || !result.registrationInfo) return { error: 'invalid' };
+    if (!consumeChallenge(c)) return { error: 'challenge' };
     const cred = result.registrationInfo.credential;
     return transaction(db, () => {
       if (kind === 'enroll') {
@@ -135,15 +160,14 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
 
   // ---- authentication -------------------------------------------------------------------
 
-  async function authenticationOptions(client) {
+  async function authenticationOptions() {
     const options = await generateAuthenticationOptions({ rpID, userVerification: 'required', allowCredentials: [] });
-    const challengeId = storeChallenge('login', options.challenge, client);
-    return challengeId ? { challengeId, options } : null;
+    return { challengeId: issueChallenge('login', options.challenge), options };
   }
 
   // Same result shape as verifyRegistration.
   async function verifyAuthentication({ challengeId, response }) {
-    const c = takeChallenge(challengeId, 'login');
+    const c = openChallenge(challengeId, 'login');
     if (!c) return { error: 'challenge' };
     const row = typeof response.id === 'string' ? db.prepare('SELECT * FROM passkeys WHERE id = ?').get(response.id) : null;
     if (!row) return { error: 'invalid' };
@@ -161,6 +185,7 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
       return { error: 'invalid' };
     }
     if (!result.verified) return { error: 'invalid' };
+    if (!consumeChallenge(c)) return { error: 'challenge' };
     db.prepare('UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?').run(result.authenticationInfo.newCounter, now(), row.id);
     return { id: row.id };
   }

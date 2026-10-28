@@ -131,10 +131,12 @@ export function loadConfig(env = process.env, { readSecrets = true } = {}) {
     port: int(env, 'PORT', 8080, 1, 65535, errors),
     dataDir: env.DATA_DIR || '/data',
     trustedCidrs: cidrs(env, 'TRUSTED_CIDRS', errors),
-    // ADMIN_PUBLIC=true is the explicit opt-in to serve the PWA/admin API to every address
-    // (passkeys still required). It replaces ADMIN_CIDRS; /0 ranges stay forbidden everywhere.
+    // Who may open the web app/admin API is an explicit choice, never a fallback:
+    //   ADMIN_PUBLIC=true   every address (the shipped default in .env.example; passkeys required)
+    //   ADMIN_CIDRS=...     only the listed networks
+    // Setting neither (or both) refuses to start. /0 ranges stay forbidden everywhere.
     adminPublic: bool(env, 'ADMIN_PUBLIC', false, errors),
-    adminCidrs: env.ADMIN_PUBLIC === 'true' ? [] : cidrs(env, 'ADMIN_CIDRS', errors),
+    adminCidrs: [],
     trustedProxies: cidrs(env, 'TRUSTED_PROXIES', errors, { allowEmpty: true }),
     notificationsEnabled: bool(env, 'NOTIFICATIONS_ENABLED', true, errors),
     requireSetupBeforeSending: bool(env, 'REQUIRE_SETUP_BEFORE_SENDING', true, errors),
@@ -142,6 +144,8 @@ export function loadConfig(env = process.env, { readSecrets = true } = {}) {
     pushHosts,
     rateLimitPerKeyPerMinute: int(env, 'RATE_LIMIT_PER_KEY_PER_MINUTE', 30, 1, 10000, errors),
     rateLimitGlobalPerMinute: int(env, 'RATE_LIMIT_GLOBAL_PER_MINUTE', 120, 1, 100000, errors),
+    // Unauthenticated admin endpoints (session check, login, enrollment), per client per minute.
+    rateLimitAdminAnonymousPerMinute: int(env, 'RATE_LIMIT_ADMIN_ANONYMOUS_PER_MINUTE', 30, 1, 10000, errors),
     authFailureLimit: int(env, 'AUTH_FAILURE_LIMIT', 10, 1, 1000, errors),
     authBlockMinutes: int(env, 'AUTH_BLOCK_MINUTES', 15, 1, 1440, errors),
     historyRetentionDays: int(env, 'HISTORY_RETENTION_DAYS', 7, 0, 365, errors),
@@ -156,8 +160,13 @@ export function loadConfig(env = process.env, { readSecrets = true } = {}) {
     vapid: null,
   };
 
-  if (config.adminPublic && String(env.ADMIN_CIDRS ?? '').trim() !== '') {
+  const hasAdminCidrs = String(env.ADMIN_CIDRS ?? '').trim() !== '';
+  if (config.adminPublic && hasAdminCidrs) {
     errors.push('ADMIN_PUBLIC=true cannot be combined with ADMIN_CIDRS: remove ADMIN_CIDRS or set ADMIN_PUBLIC=false');
+  } else if (!config.adminPublic && !hasAdminCidrs) {
+    errors.push('choose who may open the web app: ADMIN_PUBLIC=true (from anywhere, passkey login) or ADMIN_CIDRS=<networks>');
+  } else if (!config.adminPublic) {
+    config.adminCidrs = cidrs(env, 'ADMIN_CIDRS', errors);
   }
 
   if (readSecrets) {

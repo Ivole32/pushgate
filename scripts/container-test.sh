@@ -3,6 +3,7 @@
 #   - the image works when built from an owner-only (umask 077) checkout
 #   - hardening is in effect (non-root, read-only rootfs, no capabilities, no-new-privileges)
 #   - the port is published on 127.0.0.1 only, inside 2000-2999
+#   - the default ADMIN_PUBLIC=true: web app open to any address, sending API still restricted
 #   - the host reverse proxy (simulated with curl on 127.0.0.1) is the only trusted forwarder;
 #     the forwarded client must still be inside TRUSTED_CIDRS
 #   - a key created with the CLI works, survives `restart` and full container recreation
@@ -41,7 +42,7 @@ bash scripts/gen-secrets.sh --fix-permissions "$SECRETS_DIR" >/dev/null
 cat > "$PUSHGATE_ENV_FILE" <<EOF
 PUBLIC_ORIGIN=https://notify.ctest.example
 TRUSTED_CIDRS=192.168.50.0/24
-ADMIN_CIDRS=192.168.50.0/24
+ADMIN_PUBLIC=true
 VAPID_SUBJECT=mailto:ci@example.invalid
 REQUIRE_SETUP_BEFORE_SENDING=false
 EOF
@@ -107,6 +108,15 @@ pass "host proxy -> loopback port -> pushgate accepted (gateway is the trusted p
 NOXFF=$(curl -s -o "$WORK/response" -w '%{http_code}' -X POST "$BASE/api/v1/notifications" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"title":"a","message":"b"}')
 [ "$NOXFF" = "403" ] || fail "request without forwarding header accepted ($NOXFF)"
 pass "invalid key 401; untrusted, appended or missing X-Forwarded-For 403"
+
+# Default deployment (ADMIN_PUBLIC=true): any internet address can open the web app, but the
+# admin API needs a passkey session and the sending API stays restricted to TRUSTED_CIDRS.
+get() { curl -s -o "$WORK/response" -w '%{http_code}' -H "X-Forwarded-For: $2" "$BASE$1"; }
+[ "$(get / 203.0.113.9)" = "200" ] || fail "web app not reachable from a public address"
+[ "$(get /admin/api/keys 203.0.113.9)" = "401" ] || fail "admin API reachable without a session"
+[ "$(send "$KEY" 203.0.113.9)" = "403" ] || fail "sending API reachable from a public address"
+grep -q 'X-Robots-Tag' <(curl -sI -H "X-Forwarded-For: 203.0.113.9" "$BASE/") || fail "noindex header missing"
+pass "default public web app: reachable from anywhere, admin needs passkey, sending stays restricted"
 
 # Other clients on the Docker network (here: the container itself) are not trusted proxies.
 DIRECT=$(docker compose exec -T pushgate /nodejs/bin/node -e "

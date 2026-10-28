@@ -123,3 +123,12 @@ test('ADMIN_PUBLIC is an explicit opt-in and cannot be mixed with ADMIN_CIDRS', 
   assert.throws(() => loadConfig({ ...env, ADMIN_PUBLIC: 'false', ADMIN_CIDRS: '' }), /ADMIN_CIDRS/);
   assert.throws(() => loadConfig({ ...env, ADMIN_PUBLIC: 'true', ADMIN_CIDRS: '', TRUSTED_CIDRS: '0.0.0.0/0' }), /\/0/);
 });
+
+test('who may open the web app must be chosen explicitly', () => {
+  const dir = tempDir();
+  const env = baseEnv(dir, writeSecrets(dir));
+  delete env.ADMIN_CIDRS;
+  assert.throws(() => loadConfig(env), /choose who may open the web app/);
+  assert.throws(() => loadConfig({ ...env, ADMIN_CIDRS: '   ' }), /choose who may open the web app/);
+  assert.equal(loadConfig({ ...env, ADMIN_PUBLIC: 'true' }).adminPublic, true);
+});

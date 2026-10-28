@@ -93,17 +93,22 @@ Base images are pinned by digest.
    Forwarding headers are honoured *only* when the TCP peer is in `TRUSTED_PROXIES`, and then the
    header must contain exactly one address (the host proxy must overwrite it). When a proxy is
    configured, direct connections from anything else are refused (except the loopback health check).
-4. **Fail closed configuration.** Missing/invalid `TRUSTED_CIDRS`, `ADMIN_CIDRS`, `/0` ranges,
-   missing secrets or a non-HTTPS public origin abort startup.
+4. **Fail closed configuration.** Missing/invalid `TRUSTED_CIDRS`, `/0` ranges, missing secrets or
+   a non-HTTPS public origin abort startup. Web app access must be chosen explicitly: either
+   `ADMIN_PUBLIC=true` (the shipped default in `.env.example`: reachable from any network, passkey
+   required) or `ADMIN_CIDRS`; neither or both abort startup. The sending API is never public.
 5. **No default credentials, no open setup endpoint.** The first passkey can only be enrolled with a
    one-time token (15 minutes, hashed at rest) that is created with the CLI inside the container.
    Without an unexpired token, the enrollment endpoint rejects every request.
 6. **Admin sessions**: `__Host-` cookie, `Secure; HttpOnly; SameSite=Strict`, 30 min idle / 12 h
    absolute, token hashed at rest. State-changing requests need a per-session CSRF header *and* a
    matching `Origin`.
-   WebAuthn challenges are single use, expire after 5 minutes and are capped per client (5) and
-   globally (1000); when full, new requests get `429` instead of evicting pending challenges, and
-   stale challenges do not count toward the brute-force block.
+   WebAuthn challenges are stateless tokens `base64url({kind, challenge, expiry}).HMAC` (random
+   key per process, so a restart invalidates all outstanding challenges): the server stores nothing per issued challenge, so anonymous floods
+   cannot exhaust a table and block the administrator. A challenge is bound to its ceremony kind,
+   expires after 5 minutes and is single use (recorded only after a successful verification, with
+   no `await` between check and insert). Forged/stale challenges do not count toward the
+   brute-force block; unauthenticated admin endpoints have an in-app per-client rate limit.
 7. **Brute-force counters** are keyed per IPv4 address or IPv6 /64, are not reset by a
    successful request, and active blocks are never evicted from the bounded in-memory table.
 8. **Service keys cannot administer anything.** The admin API accepts only passkey sessions; API keys

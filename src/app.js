@@ -30,6 +30,7 @@ export function createApp({ config, db, log, send }) {
     global: createRateLimiter(config.rateLimitGlobalPerMinute),
     apiFailures: createFailureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
     adminFailures: createFailureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
+    adminAnonymous: createRateLimiter(config.rateLimitAdminAnonymousPerMinute),
   };
   const ctx = { config, db, log, audit, keys, devices, auth, pusher, limits, version: VERSION, startedAt: Date.now() };
   const handleNotify = createNotifyHandler(ctx);

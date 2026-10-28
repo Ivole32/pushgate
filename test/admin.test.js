@@ -277,28 +277,46 @@ test('static files carry a strict CSP and security headers', async () => {
   assert.equal((await t.request({ path: '/manifest.webmanifest' })).headers['content-type'], 'application/manifest+json; charset=utf-8');
 });
 
-test('challenge flooding cannot cancel another sign-in or lock out the administrator', async () => {
-  const t = await app({ env: { AUTH_FAILURE_LIMIT: '3' } });
+test('a distributed challenge flood cannot block or lock out the administrator', async () => {
+  const t = await app({ env: { ADMIN_PUBLIC: 'true', ADMIN_CIDRS: '', TRUSTED_PROXIES: '127.0.0.1/32', AUTH_FAILURE_LIMIT: '3' } });
   const authn = createSoftAuthenticator({ origin: ORIGIN, rpId: 'pushgate.test' });
+  const admin = { Origin: ORIGIN, 'X-Forwarded-For': '203.0.113.9' };
+  const post = (path, body, headers = admin) => t.request({ method: 'POST', path, body, headers });
   const { token } = t.ctx.auth.createEnrollmentToken();
-  const post = (path, body) => t.request({ method: 'POST', path, body, headers: { Origin: ORIGIN } });
   const opts = await post('/admin/api/enroll/options', { token });
   assert.equal((await post('/admin/api/enroll/verify', { token, name: 'p', challenge_id: opts.json.challenge_id, response: authn.register(opts.json.options) })).status, 200);
 
-  // Start a sign-in, then flood: the client hits its cap instead of evicting the pending challenge.
+  // The administrator starts a sign-in; then 1500 other addresses request challenges
+  // (more than the old fixed-size challenge table could hold).
   const pending = await post('/admin/api/login/options', {});
-  let limited = 0;
-  for (let i = 0; i < 20; i++) if ((await post('/admin/api/login/options', {})).status === 429) limited++;
-  assert.ok(limited >= 15, 'per-client challenge cap enforced');
+  for (let i = 0; i < 1500; i++) {
+    const r = await post('/admin/api/login/options', {}, { Origin: ORIGIN, 'X-Forwarded-For': `198.51.${100 + (i >> 8)}.${i & 255}` });
+    assert.equal(r.status, 200);
+  }
 
-  // Stale or unknown challenges are not counted as credential failures.
-  for (let i = 0; i < 5; i++) {
-    const r = await post('/admin/api/login/verify', { challenge_id: 'A'.repeat(22), response: authn.login(pending.json.options) });
+  // Forged, cross-kind and malformed challenges are rejected but not counted as credential failures.
+  const [payload] = pending.json.challenge_id.split('.');
+  const forged = `${payload}.${'A'.repeat(43)}`;
+  // A fresh, validly signed enrollment challenge offered for login: rejected because kinds are bound.
+  const crossKind = (await post('/admin/api/enroll/options', { token: t.ctx.auth.createEnrollmentToken().token })).json.challenge_id;
+  for (const challenge_id of [forged, crossKind, forged, forged]) {
+    const r = await post('/admin/api/login/verify', { challenge_id, response: authn.login(pending.json.options) });
     assert.equal(r.status, 400);
     assert.equal(r.json.error.code, 'challenge_expired');
   }
   const ok = await post('/admin/api/login/verify', { challenge_id: pending.json.challenge_id, response: authn.login(pending.json.options) });
-  assert.equal(ok.status, 200, 'the pending sign-in still succeeds');
+  assert.equal(ok.status, 200, 'the pending sign-in still succeeds and the admin is not blocked');
+
+  // A challenge that completed a sign-in cannot be used again.
+  const replay = await post('/admin/api/login/verify', { challenge_id: pending.json.challenge_id, response: authn.login(pending.json.options) });
+  assert.equal(replay.status, 400);
+});
+
+test('unauthenticated admin endpoints are rate limited per client inside the app', async () => {
+  const t = await app({ env: { RATE_LIMIT_ADMIN_ANONYMOUS_PER_MINUTE: '5' } });
+  const statuses = [];
+  for (let i = 0; i < 7; i++) statuses.push((await t.request({ method: 'POST', path: '/admin/api/login/options', body: {}, headers: { Origin: ORIGIN } })).status);
+  assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429, 429]);
 });
 
 test('ADMIN_PUBLIC opens only the web app and admin API; sending stays restricted', async () => {
@@ -313,4 +331,25 @@ test('ADMIN_PUBLIC opens only the web app and admin API; sending stays restricte
   // The proxy rules still apply: spoofed or missing forwarding headers are refused.
   assert.equal((await t.request({ path: '/', headers: { 'X-Forwarded-For': '203.0.113.9, 10.0.0.1' } })).status, 403);
   assert.equal((await t.request({ path: '/' })).status, 403);
+});
+
+test('login challenges do not survive a server restart', async () => {
+  const { startApp, tempDir } = await import('./helpers.js');
+  const dir = tempDir();
+  const first = await startApp({ dir }); // closed below, not by the shared teardown
+  const authn = createSoftAuthenticator({ origin: ORIGIN, rpId: 'pushgate.test' });
+  const post = (t, path, body) => t.request({ method: 'POST', path, body, headers: { Origin: ORIGIN } });
+  const { token } = first.ctx.auth.createEnrollmentToken();
+  const eo = await post(first, '/admin/api/enroll/options', { token });
+  await post(first, '/admin/api/enroll/verify', { token, name: 'p', challenge_id: eo.json.challenge_id, response: authn.register(eo.json.options) });
+  const lo = await post(first, '/admin/api/login/options', {});
+  const captured = { challenge_id: lo.json.challenge_id, response: authn.login(lo.json.options) };
+  assert.equal((await post(first, '/admin/api/login/verify', captured)).status, 200);
+  await first.close();
+
+  // Same data directory and secrets, new process: the captured request must not log in again.
+  const second = await app({ dir, secrets: first.secrets });
+  const replay = await post(second, '/admin/api/login/verify', captured);
+  assert.equal(replay.status, 400);
+  assert.equal(replay.json.error.code, 'challenge_expired');
 });

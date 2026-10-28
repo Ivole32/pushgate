@@ -21,6 +21,8 @@ export function setSecurityHeaders(res, { hsts }) {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  // A private admin app: keep it out of search engines even when it is reachable publicly.
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   if (hsts) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
 }
 

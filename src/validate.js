@@ -75,6 +75,8 @@ export function validate(value, fields) {
 }
 
 export const PRIORITIES = ['low', 'normal', 'high'];
+// Signed, stateless WebAuthn challenge token issued by admin/auth.js: payload.mac
+export const CHALLENGE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,400}\.[A-Za-z0-9_-]{43}$/;
 export const priorityRank = (p) => PRIORITIES.indexOf(p);
 
 export const schemas = {
@@ -128,17 +130,17 @@ export const schemas = {
   },
   enrollVerify: {
     token: { type: 'string', required: true, minLength: 1, maxLength: 100 },
-    challenge_id: { type: 'string', required: true, pattern: /^[A-Za-z0-9_-]{22}$/ },
+    challenge_id: { type: 'string', required: true, pattern: CHALLENGE_TOKEN_PATTERN },
     name: { type: 'string', required: true, minLength: 1, maxLength: 64 },
     response: { type: 'object', required: true, fields: null },
   },
   addPasskeyVerify: {
-    challenge_id: { type: 'string', required: true, pattern: /^[A-Za-z0-9_-]{22}$/ },
+    challenge_id: { type: 'string', required: true, pattern: CHALLENGE_TOKEN_PATTERN },
     name: { type: 'string', required: true, minLength: 1, maxLength: 64 },
     response: { type: 'object', required: true, fields: null },
   },
   loginVerify: {
-    challenge_id: { type: 'string', required: true, pattern: /^[A-Za-z0-9_-]{22}$/ },
+    challenge_id: { type: 'string', required: true, pattern: CHALLENGE_TOKEN_PATTERN },
     response: { type: 'object', required: true, fields: null },
   },
   testPush: {
