@@ -46,11 +46,14 @@ function main() {
       listen: `${config.host}:${config.port}`,
       public_origin: config.publicOrigin,
       trusted_cidrs: config.trustedCidrs.map((c) => c.text),
-      admin_cidrs: config.adminCidrs.map((c) => c.text),
+      admin_cidrs: config.adminPublic ? 'PUBLIC (ADMIN_PUBLIC=true)' : config.adminCidrs.map((c) => c.text),
       trusted_proxies: config.trustedProxies.map((c) => c.text),
       notifications_enabled: config.notificationsEnabled,
       admin_configured: app.ctx.auth.hasAdmin(),
     });
+    if (config.adminPublic) {
+      log.warn('ADMIN_PUBLIC=true: the web app and admin API accept connections from every address (passkey login still required)');
+    }
     if (!app.ctx.auth.hasAdmin()) {
       log.warn('no administrator passkey yet: create an enrollment token with "node src/cli.js enroll-token"');
     }

@@ -111,3 +111,15 @@ test('unreadable secret files produce an actionable message without contents', a
   assert.match(plain, /mode 600/);
   assert.doesNotMatch(plain, /remapping|SELinux/);
 });
+
+test('ADMIN_PUBLIC is an explicit opt-in and cannot be mixed with ADMIN_CIDRS', () => {
+  const dir = tempDir();
+  const env = baseEnv(dir, writeSecrets(dir));
+  const pub = loadConfig({ ...env, ADMIN_PUBLIC: 'true', ADMIN_CIDRS: '' });
+  assert.equal(pub.adminPublic, true);
+  assert.deepEqual(pub.adminCidrs, []);
+  assert.throws(() => loadConfig({ ...env, ADMIN_PUBLIC: 'true' }), /cannot be combined/);
+  assert.throws(() => loadConfig({ ...env, ADMIN_PUBLIC: 'yes', ADMIN_CIDRS: '' }), ConfigError);
+  assert.throws(() => loadConfig({ ...env, ADMIN_PUBLIC: 'false', ADMIN_CIDRS: '' }), /ADMIN_CIDRS/);
+  assert.throws(() => loadConfig({ ...env, ADMIN_PUBLIC: 'true', ADMIN_CIDRS: '', TRUSTED_CIDRS: '0.0.0.0/0' }), /\/0/);
+});

@@ -37,6 +37,9 @@ export function createApp({ config, db, log, send }) {
   const files = loadStatic(PUBLIC_DIR);
   const hsts = config.publicOrigin.startsWith('https:');
 
+  // PWA/admin zone: the configured admin networks, or everyone with the explicit ADMIN_PUBLIC opt-in.
+  const adminAllowed = (ip) => config.adminPublic || ipInCidrs(ip, config.adminCidrs);
+
   function reject(res, requestId, client, zone, reason) {
     audit.recordThrottled('network.rejected', { ip: client.ip ?? client.peer, detail: { zone, reason } });
     sendError(res, errors.forbidden(), requestId);
@@ -49,7 +52,7 @@ export function createApp({ config, db, log, send }) {
     if (pathname === '/healthz') {
       const peer = normalizeIp(req.socket.remoteAddress);
       const local = isLoopback(peer) && !client.viaProxy;
-      if (!local && !(client.ok && ipInCidrs(client.ip, config.adminCidrs))) return reject(res, requestId, client, 'health', client.reason ?? 'cidr');
+      if (!local && !(client.ok && adminAllowed(client.ip))) return reject(res, requestId, client, 'health', client.reason ?? 'cidr');
       db.prepare('SELECT 1').get();
       return sendJson(res, 200, { status: 'ok' });
     }
@@ -64,8 +67,8 @@ export function createApp({ config, db, log, send }) {
       return handleNotify(req, res, client);
     }
 
-    // Everything else (PWA and admin API): only the configured admin networks.
-    if (!ipInCidrs(client.ip, config.adminCidrs)) return reject(res, requestId, client, 'admin', 'cidr');
+    // Everything else (PWA and admin API).
+    if (!adminAllowed(client.ip)) return reject(res, requestId, client, 'admin', 'cidr');
     if (pathname.startsWith('/admin/api/')) return handleAdmin(req, res, url, client);
     if (req.method !== 'GET' && req.method !== 'HEAD') throw errors.methodNotAllowed();
     if (!serveStatic(files, req, res, pathname)) throw errors.notFound();

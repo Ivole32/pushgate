@@ -235,6 +235,29 @@ container `172.20.2.10`). They are set in `compose.yaml` and can be overridden w
 changes `TRUSTED_PROXIES`). Compose refuses to start if another Docker network already uses an
 overlapping range.
 
+### Public admin access
+
+Receiving notifications never needs inbound access: they reach the phone through Apple's push
+service wherever it is. Only *opening the web app* (enrollment, enabling notifications, managing
+keys and devices) needs to reach the server. To allow that from anywhere without a VPN:
+
+1. Serve a public DNS name with a publicly trusted certificate (e.g. `certbot --nginx -d
+   notify.example.com`) and set `PUBLIC_ORIGIN=https://notify.example.com`.
+2. In `.env`, remove `ADMIN_CIDRS` and set `ADMIN_PUBLIC=true`. Keep `TRUSTED_CIDRS` as narrow as
+   before: the sending API stays restricted (list your senders' addresses, e.g. the server's own
+   public IP `/32` for services on the same host that call the public URL).
+3. Use the rate-limited `/admin/api/` location from [deploy/nginx-host.conf](deploy/nginx-host.conf).
+4. `docker compose up -d --force-recreate`. The log shows `admin_cidrs: "PUBLIC (ADMIN_PUBLIC=true)"`.
+
+What protects the public admin surface: passkey-only login (phishing-resistant, no passwords),
+enrollment only with a 15-minute one-time token from the CLI, single-use WebAuthn challenges with
+per-client caps, per-client brute-force blocks, `__Host-` SameSite=Strict session cookies with
+CSRF tokens and Origin checks, strict CSP. Residual risks: anyone can see that a Pushgate instance
+exists and load its static files; a distributed flood from many addresses can exhaust the global
+challenge table (1000 pending) and delay your login by up to 5 minutes; and the code has not had
+an external audit for internet exposure. `0.0.0.0/0` and `::/0` remain invalid in every CIDR
+setting, so the sending API cannot be made public by accident.
+
 ## iPhone installation
 
 Web Push on iOS works **only** for web apps added to the Home Screen, on iOS/iPadOS 16.4+.

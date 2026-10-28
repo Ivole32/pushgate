@@ -300,3 +300,17 @@ test('challenge flooding cannot cancel another sign-in or lock out the administr
   const ok = await post('/admin/api/login/verify', { challenge_id: pending.json.challenge_id, response: authn.login(pending.json.options) });
   assert.equal(ok.status, 200, 'the pending sign-in still succeeds');
 });
+
+test('ADMIN_PUBLIC opens only the web app and admin API; sending stays restricted', async () => {
+  const t = await app({ env: { ADMIN_PUBLIC: 'true', ADMIN_CIDRS: '', TRUSTED_PROXIES: '127.0.0.1/32', TRUSTED_CIDRS: '10.0.0.0/8' } });
+  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const internet = { 'X-Forwarded-For': '203.0.113.9' };
+  assert.equal((await t.request({ path: '/', headers: internet })).status, 200);
+  assert.equal((await t.request({ path: '/admin/api/session', headers: internet })).status, 200);
+  assert.equal((await t.request({ path: '/admin/api/keys', headers: internet })).status, 401, 'still needs a passkey session');
+  const send = await t.request({ method: 'POST', path: '/api/v1/notifications', headers: { ...internet, Authorization: `Bearer ${key}` }, body: { title: 'a', message: 'b' } });
+  assert.equal(send.status, 403, 'sending API keeps its CIDR restriction');
+  // The proxy rules still apply: spoofed or missing forwarding headers are refused.
+  assert.equal((await t.request({ path: '/', headers: { 'X-Forwarded-For': '203.0.113.9, 10.0.0.1' } })).status, 403);
+  assert.equal((await t.request({ path: '/' })).status, 403);
+});

@@ -131,7 +131,10 @@ export function loadConfig(env = process.env, { readSecrets = true } = {}) {
     port: int(env, 'PORT', 8080, 1, 65535, errors),
     dataDir: env.DATA_DIR || '/data',
     trustedCidrs: cidrs(env, 'TRUSTED_CIDRS', errors),
-    adminCidrs: cidrs(env, 'ADMIN_CIDRS', errors),
+    // ADMIN_PUBLIC=true is the explicit opt-in to serve the PWA/admin API to every address
+    // (passkeys still required). It replaces ADMIN_CIDRS; /0 ranges stay forbidden everywhere.
+    adminPublic: bool(env, 'ADMIN_PUBLIC', false, errors),
+    adminCidrs: env.ADMIN_PUBLIC === 'true' ? [] : cidrs(env, 'ADMIN_CIDRS', errors),
     trustedProxies: cidrs(env, 'TRUSTED_PROXIES', errors, { allowEmpty: true }),
     notificationsEnabled: bool(env, 'NOTIFICATIONS_ENABLED', true, errors),
     requireSetupBeforeSending: bool(env, 'REQUIRE_SETUP_BEFORE_SENDING', true, errors),
@@ -152,6 +155,10 @@ export function loadConfig(env = process.env, { readSecrets = true } = {}) {
     pepper: null,
     vapid: null,
   };
+
+  if (config.adminPublic && String(env.ADMIN_CIDRS ?? '').trim() !== '') {
+    errors.push('ADMIN_PUBLIC=true cannot be combined with ADMIN_CIDRS: remove ADMIN_CIDRS or set ADMIN_PUBLIC=false');
+  }
 
   if (readSecrets) {
     try {

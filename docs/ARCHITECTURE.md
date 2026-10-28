@@ -122,7 +122,7 @@ secrets (`endpoint`, `p256dh`, `auth`), VAPID private key, pepper.
 
 | Threat | Mitigation | Residual risk |
 |---|---|---|
-| Internet attacker | Container published on 127.0.0.1 only; host proxy firewalled to the LAN; CIDR ACL | Misconfigured port forwarding on the router |
+| Internet attacker | Container published on 127.0.0.1 only; host proxy firewalled to the LAN; CIDR ACL (with `ADMIN_PUBLIC=true`: web app reachable, passkey required; sending API still CIDR-restricted) | Misconfigured port forwarding on the router |
 | Malicious/compromised LAN host without a key | Per-service API key required; brute-force blocks; rate limits | Can probe the UI/login page (passkey required) |
 | Compromised service host | Can only use *its own* key (only send, optionally not `high`); revoke/rotate one key | Can send spam until revoked |
 | Spoofed `X-Forwarded-For` | Header ignored unless TCP peer is the trusted proxy (Docker gateway); host proxy overwrites it | Host proxy that appends/forwards client headers; local host processes can reach the loopback port |
