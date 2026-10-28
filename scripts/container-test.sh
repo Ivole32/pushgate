@@ -35,8 +35,8 @@ pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*" >&2; exit 1; }
 
 node src/cli.js gen-secrets --out "$SECRETS_DIR" >/dev/null
-# Test only: the runner's uid differs from the container's, so make the throw-away secrets readable.
-chmod 755 "$SECRETS_DIR"; chmod 444 "$SECRETS_DIR"/*
+# Same permission layout as production (scripts/gen-secrets.sh): private directory, 0444 files.
+bash scripts/gen-secrets.sh --fix-permissions "$SECRETS_DIR" >/dev/null
 
 cat > "$PUSHGATE_ENV_FILE" <<EOF
 PUBLIC_ORIGIN=https://notify.ctest.example

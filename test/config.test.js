@@ -98,3 +98,16 @@ test('per-client counters group IPv6 addresses by /64', async () => {
   assert.equal(clientKey('2001:db8:1:2::1'), clientKey('2001:db8:1:2:ffff:ffff:ffff:fffe'));
   assert.notEqual(clientKey('2001:db8:1:2::1'), clientKey('2001:db8:1:3::1'));
 });
+
+test('unreadable secret files produce an actionable message without contents', async () => {
+  const { unreadableSecretMessage } = await import('../src/config.js');
+  const remapped = unreadableSecretMessage('API key pepper', { uid: 65534, mode: 0o100400 }, 'EACCES', 65532);
+  assert.match(remapped, /file uid 65534, mode 400; process uid 65532/);
+  assert.match(remapped, /user-namespace remapping/);
+  assert.match(remapped, /--fix-permissions/);
+  const mac = unreadableSecretMessage('VAPID private key', { uid: 0, mode: 0o100444 }, 'EACCES', 65532);
+  assert.match(mac, /SELinux/);
+  const plain = unreadableSecretMessage('API key pepper', { uid: 0, mode: 0o100600 }, 'EACCES', 65532);
+  assert.match(plain, /mode 600/);
+  assert.doesNotMatch(plain, /remapping|SELinux/);
+});

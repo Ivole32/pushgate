@@ -116,8 +116,18 @@ Environment variables are visible in `docker inspect`, in `/proc/<pid>/environ`,
 child processes and frequently end up in logs or support bundles. Compose `secrets:` with `file:`
 are bind-mounted read-only at `/run/secrets/<name>`; only the path appears in the container
 configuration. They are **not** encrypted at rest on the host (unlike Swarm secrets), so the
-host files must be protected (`0400`, owned by uid 65532, outside the repository, included in
-encrypted backups). Pushgate reads secrets **only from files**; `.env` holds non-secret settings.
+host files must be protected (outside the repository, included in encrypted backups). Pushgate
+reads secrets **only from files**; `.env` holds non-secret settings.
+
+**Secret file permissions.** The `secrets/` directory is `0700` (owned by the user who runs
+`docker compose`, usually root) and the files in it are `0444`. Other host users cannot reach
+the files because they cannot enter the directory. Compose bind-mounts each *file* directly to
+`/run/secrets/<name>`, so the container never needs the directory, and `0444` lets the container
+user read it whatever host uid it maps to. Matching a host uid instead (e.g. `chown 65532`) breaks
+under Docker user-namespace remapping (`userns-remap`) and rootless Docker, where container uid
+65532 is a different host uid. `scripts/gen-secrets.sh` creates this layout;
+`scripts/gen-secrets.sh --fix-permissions` repairs it. On SELinux hosts also label the files:
+`chcon -t container_file_t secrets/*`. Keep the directory `0700` when copying or restoring it.
 
 | Secret | Where | Effect if lost | Effect if leaked |
 |---|---|---|---|
@@ -143,8 +153,7 @@ Requirements: Linux host with Docker Engine + Compose v2, an HTTPS reverse proxy
 git clone <this repository> pushgate && cd pushgate
 cp .env.example .env
 $EDITOR .env                 # replace EVERY value, especially TRUSTED_CIDRS / ADMIN_CIDRS
-scripts/gen-secrets.sh       # creates secrets/api_key_pepper and secrets/vapid_private_key
-sudo chown 65532:65532 secrets/* && sudo chmod 400 secrets/*
+scripts/gen-secrets.sh       # creates secrets/ (0700) with api_key_pepper and vapid_private_key (0444)
 docker compose up -d --build
 docker compose ps            # pushgate should become "healthy"
 curl -s -H "X-Forwarded-For: 192.168.1.50" http://127.0.0.1:2580/healthz   # {"status":"ok"} (use an ADMIN_CIDRS address)
@@ -346,8 +355,12 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
   restarting): older images copied the checkout's permission bits, so a checkout made with
   `umask 077` was unreadable by the runtime user. Update and rebuild:
   `git pull && docker compose up -d --build`.
-- **`API key pepper file is unreadable`** (or VAPID key) at startup: the secret files must be
-  readable by uid 65532: `sudo chown 65532:65532 secrets/* && sudo chmod 400 secrets/*`.
+- **`API key pepper file is unreadable`** (or VAPID key) at startup: the message shows the file's
+  uid and mode as seen inside the container. Apply the supported layout and recreate:
+  `scripts/gen-secrets.sh --fix-permissions && docker compose up -d --force-recreate`
+  (see [Secret file permissions](#secrets-environment-variables-vs-compose-secrets)). A file uid of
+  `65534` inside the container means Docker user-namespace remapping or rootless Docker; a
+  world-readable file that still fails points to SELinux (`chcon -t container_file_t secrets/*`).
 - **Compose: `Pool overlaps with other one on this space`**: another Docker network already uses
   part of `172.20.2.0/24`. List subnets with
   `docker network inspect -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}' $(docker network ls -q)`.

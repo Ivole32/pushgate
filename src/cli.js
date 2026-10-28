@@ -44,11 +44,14 @@ function fail(message) {
 
 function genSecrets(out) {
   if (!out) fail('gen-secrets requires --out <dir>');
+  // Same layout as scripts/gen-secrets.sh: private directory, world-readable files, so the
+  // container user can read them under any user-namespace mapping (see README).
   fs.mkdirSync(out, { recursive: true, mode: 0o700 });
+  fs.chmodSync(out, 0o700);
   const write = (name, content) => {
     const file = path.join(out, name);
     // 'wx' refuses to overwrite: replacing secrets invalidates all keys/subscriptions.
-    fs.writeFileSync(file, content, { mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(file, content, { mode: 0o444, flag: 'wx' });
     process.stdout.write(`wrote ${file}\n`);
   };
   const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });

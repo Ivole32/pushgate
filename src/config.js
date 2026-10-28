@@ -46,9 +46,21 @@ export function readSecretFile(file, label) {
   if (!stat.isFile() || stat.size === 0 || stat.size > 16384) throw new ConfigError(`${label} file is empty or invalid`);
   try {
     return fs.readFileSync(file, 'utf8');
-  } catch {
-    throw new ConfigError(`${label} file is unreadable (check ownership: the container runs as uid 65532)`);
+  } catch (err) {
+    throw new ConfigError(unreadableSecretMessage(label, stat, err?.code, process.getuid?.()));
   }
+}
+
+// Explains why a secret file cannot be read, using metadata only (never the contents).
+export function unreadableSecretMessage(label, stat, code, processUid) {
+  const mode = (stat.mode & 0o777).toString(8).padStart(3, '0');
+  let hint = 'run "scripts/gen-secrets.sh --fix-permissions" on the host (secrets directory 0700, files 0444)';
+  if (stat.uid === 65534) {
+    hint = 'the file owner is not mapped into the container (Docker user-namespace remapping or rootless Docker); ' + hint;
+  } else if (code === 'EACCES' && (stat.mode & 0o004)) {
+    hint = 'the file is world-readable, so a security module (SELinux/AppArmor) is probably denying access; on SELinux run "chcon -t container_file_t secrets/*"';
+  }
+  return `${label} file is unreadable (${code ?? 'error'}; file uid ${stat.uid}, mode ${mode}; process uid ${processUid ?? 'n/a'}): ${hint}`;
 }
 
 export function parsePepper(text) {
