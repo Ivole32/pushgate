@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Minimal, self-hosted Web Push notification gateway for an iOS Home Screen web app",
   "private": true,
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "engines": {
     "node": ">=24.0.0"

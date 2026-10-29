@@ -20,7 +20,7 @@ curl -X POST https://notify.home.example/api/v1/notifications \
 Contents: [Setup](#setup) · [How it is secured](#how-it-is-secured) · [Architecture](#architecture) · [Security model](#security-model) ·
 [HTTPS](#https-and-the-reverse-proxy) · [iPhone](#iphone-installation) · [API keys](#api-keys) ·
 [Sending](#sending-notifications) · [Operations](#operations) · [Troubleshooting](#troubleshooting-ios-delivery) ·
-[Limitations](#known-limitations) · [Development](#development)
+[Limitations](#known-limitations) · [Development](#development) · [License](#license)
 
 ## Setup
 
@@ -522,3 +522,21 @@ npm run scan:image        # npm audit + Trivy scan of the image (fails on HIGH/C
 ```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs all of them on every push and weekly.
+
+## License
+
+pushgate is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). In short:
+
+- **Noncommercial use only.** You may use, change and share pushgate for personal, hobby, research
+  and educational purposes and in noncommercial organizations. You may not sell it or use it to
+  make money.
+- **Credit the author.** Anyone you give a copy of pushgate, or of any part of it (changed or not),
+  must also get the license (or its URL) and this notice:
+
+  > Required Notice: Copyright (c) 2026 Ivole32 (https://github.com/Ivole32/pushgate)
+
+- **No warranty, no liability.** The software comes as is; the author is not liable for any
+  damages arising from its use.
+
+This summary is for convenience; the [license text](LICENSE.md) is what applies. For commercial
+use, ask the author for a separate license.
