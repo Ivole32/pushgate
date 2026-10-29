@@ -122,6 +122,19 @@ test('a recovery enrollment signs out every existing session', async () => {
   assert.equal((await t.request({ path: '/admin/api/keys', headers: second })).status, 200);
 });
 
+test('a refused recovery enrollment neither spends the token nor signs anyone out', async () => {
+  const t = await app();
+  const authn = soft();
+  const h = await enroll(t, authn);
+  // The same authenticator again: its credential id is already registered.
+  const { token } = t.ctx.auth.createEnrollmentToken();
+  const opts = await post(t, '/admin/api/enroll/options', { token });
+  const r = await post(t, '/admin/api/enroll/verify', { token, name: 'again', challenge_id: opts.json.challenge_id, response: authn.register(opts.json.options) });
+  assert.equal(r.status, 401);
+  assert.equal((await t.request({ path: '/admin/api/keys', headers: h })).status, 200, 'session kept');
+  assert.equal(t.db.prepare('SELECT used_at FROM enrollment_tokens').all().filter((row) => row.used_at === null).length, 1, 'token unspent');
+});
+
 test('passkeys with unaddressable ids or invalid transports cannot be planted', async () => {
   const t = await app();
   const h = await enroll(t, soft());

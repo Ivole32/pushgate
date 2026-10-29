@@ -161,6 +161,10 @@ test('format characters that real text needs are accepted, hidden tag text is no
     { title: 'a\u{E0061}b', message: 'b' },
     { title: 'a', message: '\u{1F3F4}\u{E0067}\u{E0062}' },
     { title: 'a', message: `${flag}\u{E0061}` },
+    // A made-up "flag" carrying a hidden message, and runs of zero-width joiners (hidden bits).
+    { title: 'a', message: `\u{1F3F4}${[...'hiddentext'].map((c) => String.fromCodePoint(0xE0000 + c.codePointAt(0))).join('')}\u{E007F}` },
+    { title: 'a\u200C\u200Db', message: 'b' },
+    { title: 'a', message: 'b\u200D\u200Dc' },
   ]) {
     assert.equal((await notify(t, key, body)).status, 400, JSON.stringify(body));
   }

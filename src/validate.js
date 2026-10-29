@@ -8,12 +8,13 @@
 
 // Characters that can disguise text: controls (Cc), invisible format characters such as bidi
 // marks/overrides/isolates, zero-width spaces and BOM (Cf), and the line/paragraph separators
-// U+2028/U+2029, which break "single-line" fields. ZWJ and ZWNJ stay allowed (emoji sequences;
-// Persian and Indic spelling), and so do tag characters inside an emoji subdivision flag such as
-// England's; on their own, tag characters are invisible text.
-const CONTROL = /(?![\n\t\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-const CONTROL_SINGLE_LINE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-const FLAG_TAG_SEQUENCE = /\u{1F3F4}[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]+\u{E007F}/gu;
+// U+2028/U+2029, which break "single-line" fields. A single ZWJ or ZWNJ stays allowed (emoji
+// sequences; Persian and Indic spelling), but not a run of them, which could encode hidden bits.
+// Tag characters are invisible text except in the three standard subdivision flags (England,
+// Scotland, Wales).
+const CONTROL = /(?![\n\t\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|[\u200C\u200D]{2}/u;
+const CONTROL_SINGLE_LINE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|[\u200C\u200D]{2}/u;
+const FLAG_TAG_SEQUENCE = /\u{1F3F4}(?:\u{E0067}\u{E0062}(?:\u{E0065}\u{E006E}\u{E0067}|\u{E0073}\u{E0063}\u{E0074}|\u{E0077}\u{E006C}\u{E0073}))\u{E007F}/gu;
 
 function check(value, spec, path, errors) {
   switch (spec.type) {

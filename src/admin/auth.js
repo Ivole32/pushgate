@@ -168,6 +168,8 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
     if (typeof cred.id !== 'string' || !PASSKEY_ID.test(cred.id)) return { error: 'invalid' };
     if (!consumeChallenge(c)) return { error: 'challenge' };
     return transaction(db, () => {
+      // Checked first: a refused enrollment must neither spend the token nor sign anyone out.
+      if (db.prepare('SELECT 1 FROM passkeys WHERE id = ?').get(cred.id)) return { error: 'invalid' };
       if (kind === 'enroll') {
         // Consume the token atomically with storing the passkey.
         const res = db.prepare('UPDATE enrollment_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?')
@@ -177,7 +179,6 @@ export function createAdminAuth({ db, config, now = () => Date.now() }) {
         // signed out. The caller starts a new session for the enrolling device.
         db.prepare('DELETE FROM sessions').run();
       }
-      if (db.prepare('SELECT 1 FROM passkeys WHERE id = ?').get(cred.id)) return { error: 'invalid' };
       db.prepare('INSERT INTO passkeys (id, public_key, counter, transports, name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(cred.id, Buffer.from(cred.publicKey), cred.counter, JSON.stringify(cleanTransports(cred.transports)), name, now());
       return { id: cred.id };

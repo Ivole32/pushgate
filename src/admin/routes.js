@@ -237,7 +237,7 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
       if (!result) throw new HttpError(409, 'device_limit', 'Maximum number of devices reached');
       audit.record(result.created ? 'device.registered' : 'device.updated', { actor: 'admin', ip: client.ip, detail: { device: result.device.id, name: data.name } });
       securityAlert(result.created ? 'Device registered' : 'Device subscription replaced',
-        `Device "${data.name}" will now receive all notifications.`, client);
+        `Device "${data.name}" will now receive notifications of priority ${result.device.min_priority} or higher.`, client);
       return { status: result.created ? 201 : 200, body: { device: result.device } };
     }],
     ['PATCH', /^\/admin\/api\/devices\/([^/]+)$/, {}, async ({ req, params, client }) => {
@@ -248,7 +248,8 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
       const device = devices.get(params[0]);
       // A raised minimum priority silently drops notifications, so it is reported like removal.
       if (device.min_priority !== before.min_priority) {
-        securityAlert('Device filter changed', `Device "${device.name}" now only receives notifications of priority ${device.min_priority} or higher.`, client);
+        const renamed = device.name !== before.name ? ` (now named "${device.name}")` : '';
+        securityAlert('Device filter changed', `Device "${before.name}"${renamed} now only receives notifications of priority ${device.min_priority} or higher.`, client);
       }
       return { device };
     }],

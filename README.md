@@ -430,8 +430,9 @@ from an earlier version:
 - Sign-ins and security-relevant changes are pushed to every device as high-priority alerts.
 - `TRUSTED_CIDRS`, `ADMIN_CIDRS` and `TRUSTED_PROXIES` ranges wider than `/8` (IPv4) or `/7` (IPv6)
   stop pushgate from starting.
-- New database files (and `pg-cli backup` output) are created mode `0600`, owned by uid 65532. A
-  host job that reads the volume directly as another non-root user needs adjusting.
+- The database's WAL/SHM side files are now created mode `0600` as well (the database file and
+  `pg-cli backup` output already were), owned by uid 65532. A host job that reads the volume
+  directly as another non-root user needs adjusting.
 - Request paths that are not canonical (`\`, `..`, absolute URLs) get `400`.
 
 Base images are pinned by digest; update tag + digest in `Dockerfile`/`compose.yaml` deliberately,
