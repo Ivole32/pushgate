@@ -132,9 +132,9 @@ IPv6) is refused in every setting, so the API cannot be opened to everyone by mi
 - *Sensitive changes* (adding or removing passkeys, creating or rotating API keys, registering a
   device) need a passkey confirmation from the last 5 minutes, so a stolen session cookie alone
   cannot take over the account. The app asks you to confirm with Face ID when needed.
-- *Security alerts*: sign-ins, passkey changes, enrollments, new API keys, device changes and
-  pausing are pushed as high-priority notifications to every registered device (a removed device
-  is told too). A recovery enrollment signs out every other session.
+- *Security alerts*: sign-ins, passkey changes, enrollments, API key changes (including
+  revocation), device changes (including minimum-priority filters) and pausing are pushed as
+  high-priority notifications to every registered device (a removed device is told too). A recovery enrollment signs out every other session.
 - *Login challenges* (the random value your passkey signs) are signed tokens rather than server
   memory, so floods of login requests cannot fill a table and block your own sign-in; each
   challenge works once and for 5 minutes.
@@ -383,7 +383,8 @@ Health card shows version, DB check, sending state, key/device counts and recent
 
 **Security events:** the app's *Security events* list (or the `audit_events` table) records key
 creation/rotation/revocation, logins, enrollments, device changes, rejected requests (throttled to
-one stored event per type and IP per minute; all are logged to stdout). Never contains keys, tokens,
+one stored event per type and client (IPv4 address or IPv6 /64) per minute and 60 in total per
+minute, the rest summarised as `audit.suppressed`; all are logged to stdout). Never contains keys, tokens,
 subscription data or notification content. Retention: `AUDIT_RETENTION_DAYS`.
 
 **Backup** (online, consistent):
@@ -414,6 +415,24 @@ git pull                       # review the changes, especially Dockerfile/compo
 docker compose up -d --build   # schema migrations run automatically at start
 docker compose ps
 ```
+
+Behaviour changes in the security hardening release (October 2026), to check when upgrading
+from an earlier version:
+
+- Notification titles start with the sending key's name (`backup-job: Backup finished`). Rename keys
+  whose names are not meant to be read on the lock screen.
+- Tags only replace notifications from the same service, and tags sent before the upgrade no longer
+  match new ones.
+- Titles and messages with invisible format characters (zero-width spaces, BOM, bidi marks) are
+  rejected with `400`. Emoji (including flags) and ZWNJ are allowed.
+- Adding/removing passkeys, creating/rotating API keys and registering devices need a passkey
+  confirmation from the last 5 minutes; sessions from before the upgrade confirm once.
+- Sign-ins and security-relevant changes are pushed to every device as high-priority alerts.
+- `TRUSTED_CIDRS`, `ADMIN_CIDRS` and `TRUSTED_PROXIES` ranges wider than `/8` (IPv4) or `/7` (IPv6)
+  stop pushgate from starting.
+- New database files (and `pg-cli backup` output) are created mode `0600`, owned by uid 65532. A
+  host job that reads the volume directly as another non-root user needs adjusting.
+- Request paths that are not canonical (`\`, `..`, absolute URLs) get `400`.
 
 Base images are pinned by digest; update tag + digest in `Dockerfile`/`compose.yaml` deliberately,
 then run `npm run test:container` and `npm run scan:image`.

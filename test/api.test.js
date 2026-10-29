@@ -149,6 +149,23 @@ test('request size and schema limits are enforced', async () => {
   assert.equal(JSON.parse(t.push.calls[0].payload).tag, t.push.calls[0].options.topic);
 });
 
+test('format characters that real text needs are accepted, hidden tag text is not', async () => {
+  const t = await app();
+  addDevice(t);
+  const { key } = t.ctx.keys.create({ name: 'svc' });
+  // ZWNJ (Persian and Indic spelling) and an emoji subdivision flag (tag characters).
+  const flag = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}';
+  assert.equal((await notify(t, key, { title: `England ${flag}`, message: 'می\u200Cخواهم' })).status, 200);
+  // Tag characters outside a complete flag are invisible text.
+  for (const body of [
+    { title: 'a\u{E0061}b', message: 'b' },
+    { title: 'a', message: '\u{1F3F4}\u{E0067}\u{E0062}' },
+    { title: 'a', message: `${flag}\u{E0061}` },
+  ]) {
+    assert.equal((await notify(t, key, body)).status, 400, JSON.stringify(body));
+  }
+});
+
 test('high priority requires the high-priority scope', async () => {
   const t = await app();
   addDevice(t);

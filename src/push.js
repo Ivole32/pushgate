@@ -70,8 +70,9 @@ export function createPusher({ config, db, devices, audit, log, send = webpush.s
     const results = await Promise.all(eligible.map(async (d) => {
       const r = await sendOne(d, payload, { ttl, priority, tag: scoped });
       if (r.outcome === 'gone') {
-        devices.remove(d.id);
-        audit.record('device.expired', { detail: { device: d.id, name: d.name, status: r.status } });
+        // Not recorded when the device was removed meanwhile (e.g. it unsubscribed itself and
+        // the admin removal sent it an alert).
+        if (devices.remove(d.id)) audit.record('device.expired', { detail: { device: d.id, name: d.name, status: r.status } });
       } else {
         devices.recordResult(d.id, r.outcome === 'delivered', r.status);
       }

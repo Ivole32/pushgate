@@ -205,7 +205,9 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
     ['POST', /^\/admin\/api\/keys\/([^/]+)\/revoke$/, {}, ({ params, client }) => {
       if (!isValidKeyId(params[0]) || !keys.revoke(params[0])) throw errors.notFound();
       audit.record('api_key.revoked', { actor: 'admin', ip: client.ip, detail: { key_id: params[0] } });
-      return { record: keys.get(params[0]) };
+      const record = keys.get(params[0]);
+      securityAlert('API key revoked', `Service API key "${record.name}" (${record.id}) was revoked and can no longer send.`, client);
+      return { record };
     }],
     ['POST', /^\/admin\/api\/keys\/([^/]+)\/rotate$/, { fresh: true }, async ({ req, params, client }) => {
       const data = await body(req, schemas.rotateKey);
@@ -240,9 +242,15 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
     }],
     ['PATCH', /^\/admin\/api\/devices\/([^/]+)$/, {}, async ({ req, params, client }) => {
       const data = await body(req, schemas.updateDevice);
-      if (!DEVICE_ID.test(params[0]) || !devices.update(params[0], { name: data.name, minPriority: data.min_priority })) throw errors.notFound();
+      const before = DEVICE_ID.test(params[0]) ? devices.get(params[0]) : null;
+      if (!before || !devices.update(params[0], { name: data.name, minPriority: data.min_priority })) throw errors.notFound();
       audit.record('device.updated', { actor: 'admin', ip: client.ip, detail: { device: params[0] } });
-      return { device: devices.get(params[0]) };
+      const device = devices.get(params[0]);
+      // A raised minimum priority silently drops notifications, so it is reported like removal.
+      if (device.min_priority !== before.min_priority) {
+        securityAlert('Device filter changed', `Device "${device.name}" now only receives notifications of priority ${device.min_priority} or higher.`, client);
+      }
+      return { device };
     }],
     ['DELETE', /^\/admin\/api\/devices\/([^/]+)$/, {}, ({ params, client }) => {
       const device = DEVICE_ID.test(params[0]) ? devices.get(params[0]) : null;

@@ -8,9 +8,12 @@
 
 // Characters that can disguise text: controls (Cc), invisible format characters such as bidi
 // marks/overrides/isolates, zero-width spaces and BOM (Cf), and the line/paragraph separators
-// U+2028/U+2029, which break "single-line" fields. ZWJ stays allowed for emoji sequences.
-const CONTROL = /(?![\n\t‍])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-const CONTROL_SINGLE_LINE = /(?!‍)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+// U+2028/U+2029, which break "single-line" fields. ZWJ and ZWNJ stay allowed (emoji sequences;
+// Persian and Indic spelling), and so do tag characters inside an emoji subdivision flag such as
+// England's; on their own, tag characters are invisible text.
+const CONTROL = /(?![\n\t\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const CONTROL_SINGLE_LINE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const FLAG_TAG_SEQUENCE = /\u{1F3F4}[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]+\u{E007F}/gu;
 
 function check(value, spec, path, errors) {
   switch (spec.type) {
@@ -19,7 +22,7 @@ function check(value, spec, path, errors) {
       const len = [...value].length;
       if (spec.minLength !== undefined && len < spec.minLength) return errors.push({ field: path, issue: `must be at least ${spec.minLength} characters` });
       if (spec.maxLength !== undefined && len > spec.maxLength) return errors.push({ field: path, issue: `must be at most ${spec.maxLength} characters` });
-      if ((spec.multiline ? CONTROL : CONTROL_SINGLE_LINE).test(value)) return errors.push({ field: path, issue: 'contains control characters' });
+      if ((spec.multiline ? CONTROL : CONTROL_SINGLE_LINE).test(value.replace(FLAG_TAG_SEQUENCE, ''))) return errors.push({ field: path, issue: 'contains control characters' });
       if (spec.enum && !spec.enum.includes(value)) return errors.push({ field: path, issue: `must be one of: ${spec.enum.join(', ')}` });
       if (spec.pattern && !spec.pattern.test(value)) return errors.push({ field: path, issue: 'has an invalid format' });
       return;

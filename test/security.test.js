@@ -89,6 +89,30 @@ test('security-relevant changes are pushed to every device, including the one be
   assert.equal(last.options.urgency, 'high', 'passes every minimum-priority filter');
 });
 
+test('silent ways to stop notifications are reported too', async () => {
+  const t = await app();
+  const phone = addDevice(t, { name: 'phone' });
+  const h = await enroll(t, soft());
+  const created = await t.request({ method: 'POST', path: '/admin/api/keys', headers: h, body: { name: 'svc' } });
+  // Raising a device's minimum priority drops notifications without anyone noticing.
+  assert.equal((await t.request({ method: 'PATCH', path: `/admin/api/devices/${phone.id}`, headers: h, body: { min_priority: 'high' } })).status, 200);
+  assert.equal((await t.request({ method: 'PATCH', path: `/admin/api/devices/${phone.id}`, headers: h, body: { name: 'renamed' } })).status, 200);
+  assert.equal((await t.request({ method: 'POST', path: `/admin/api/keys/${created.json.record.id}/revoke`, headers: h })).status, 200);
+  assert.deepEqual(alertTitles(t), ['Passkey enrolled', 'API key created', 'Device filter changed', 'API key revoked']);
+});
+
+test('removing a device that already unsubscribed is not recorded as expired', async () => {
+  // The device's push subscription is gone (it unsubscribed itself before the removal request).
+  const t = await app({ script: () => ({ statusCode: 410 }) });
+  const h = await enroll(t, soft());
+  const phone = addDevice(t);
+  assert.equal((await t.request({ method: 'DELETE', path: `/admin/api/devices/${phone.id}`, headers: h })).status, 200);
+  await new Promise((r) => setTimeout(r, 50));
+  const types = t.ctx.audit.list().map((e) => e.type);
+  assert.ok(types.includes('device.removed'));
+  assert.ok(!types.includes('device.expired'));
+});
+
 test('a recovery enrollment signs out every existing session', async () => {
   const t = await app();
   const first = await enroll(t, soft());
