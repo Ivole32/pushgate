@@ -21,6 +21,8 @@ Setup and recovery
   check-config                       Validate configuration and secrets, then exit
   enroll-token                       One-time token (15 min) to enroll an administrator passkey
   sessions revoke-all                Sign out every admin session
+  passkeys list
+  passkeys remove <passkey-id>       Also removes the last passkey (enroll a new one with a token)
 
 Service API keys
   keys list
@@ -90,6 +92,8 @@ function main(argv) {
   const [cmd, sub, arg] = positionals;
   if (!cmd || values.help) return process.stdout.write(USAGE);
   if (cmd === 'gen-secrets') return genSecrets(values.out);
+  // Database, WAL and backup files are created private (gen-secrets sets its own modes above).
+  process.umask(0o077);
 
   let config;
   try {
@@ -117,6 +121,13 @@ function main(argv) {
       const n = createAdminAuth({ db, config }).revokeAllSessions();
       audit.record('admin.sessions_revoked', { actor, detail: { count: n } });
       process.stdout.write(`revoked ${n} session(s)\n`);
+    } else if (cmd === 'passkeys' && sub === 'list') {
+      table(createAdminAuth({ db, config }).listPasskeys().map((p) => ({ ...p, created_at: iso(p.created_at), last_used_at: iso(p.last_used_at) })),
+        ['id', 'name', 'created_at', 'last_used_at']);
+    } else if (cmd === 'passkeys' && sub === 'remove') {
+      if (!arg || createAdminAuth({ db, config }).removePasskey(arg, { allowLast: true }) !== 'ok') fail('no passkey with that id');
+      audit.record('admin.passkey_removed', { actor, detail: { passkey: arg.slice(0, 12) } });
+      process.stdout.write(`removed ${arg} (its sessions are signed out)\n`);
     } else if (cmd === 'keys' && sub === 'list') {
       table(keys.list().map((k) => ({ ...k, scopes: k.scopes.join(','), created_at: iso(k.created_at), expires_at: iso(k.expires_at), last_used_at: iso(k.last_used_at) })),
         ['id', 'name', 'status', 'scopes', 'created_at', 'expires_at', 'last_used_at']);

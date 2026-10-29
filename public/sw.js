@@ -12,12 +12,15 @@ function text(value, max) {
   return typeof value === 'string' ? value.slice(0, max) : '';
 }
 
+// The sender (the server-assigned key name) leads the title: the lock screen always shows the
+// title, but only the first lines of the body, so attribution there could be pushed out of
+// view or imitated by the sender's own text.
 function toNotification(data) {
   const d = data && typeof data === 'object' ? data : {};
   const service = text(d.service, 64);
-  const body = text(d.body, MAX_BODY);
+  const title = text(d.title, MAX_TITLE) || 'Notification';
   const options = {
-    body: service ? `${body}\n— ${service}` : body,
+    body: text(d.body, MAX_BODY),
     icon: '/icons/icon-192.png',
     badge: '/icons/icon-192.png',
     data: { id: text(d.id, 64) },
@@ -27,7 +30,7 @@ function toNotification(data) {
     options.renotify = true;
   }
   if (Number.isSafeInteger(d.ts)) options.timestamp = d.ts;
-  return { title: text(d.title, MAX_TITLE) || 'Notification', options };
+  return { title: service ? `${service}: ${title}` : title, options };
 }
 
 self.addEventListener('push', (event) => {

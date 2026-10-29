@@ -111,8 +111,10 @@ In plain terms, here is what an attacker on the internet runs into, from the out
 **The sending API is not public.** Only addresses in `TRUSTED_CIDRS` can even reach
 `/api/v1/notifications`; everything else is refused before an API key is looked at. On top of
 that every service needs its own key (256 random bits, stored only as a keyed hash, revocable
-individually), with rate limits and temporary blocks after failed attempts. `0.0.0.0/0` is refused
-in every setting, so the API cannot be opened to everyone by mistake.
+individually), with rate limits and temporary blocks after failed attempts. A block only stops
+further failed attempts: a sender with a valid key is still served, so a neighbour behind the same
+router cannot silence your alerts. `0.0.0.0/0` (and any range wider than `/8` for IPv4 or `/7` for
+IPv6) is refused in every setting, so the API cannot be opened to everyone by mistake.
 
 **The web app is public, but useless without your passkey.**
 
@@ -127,6 +129,12 @@ in every setting, so the API cannot be opened to everyone by mistake.
   other sites (`SameSite=Strict`). Every change additionally needs a per-session token and a
   matching `Origin`, which blocks cross-site request forgery. Sessions expire after 30 minutes idle
   and 12 hours at most.
+- *Sensitive changes* (adding or removing passkeys, creating or rotating API keys, registering a
+  device) need a passkey confirmation from the last 5 minutes, so a stolen session cookie alone
+  cannot take over the account. The app asks you to confirm with Face ID when needed.
+- *Security alerts*: sign-ins, passkey changes, enrollments, API key changes (including
+  revocation), device changes (including minimum-priority filters) and pausing are pushed as
+  high-priority notifications to every registered device (a removed device is told too). A recovery enrollment signs out every other session.
 - *Login challenges* (the random value your passkey signs) are signed tokens rather than server
   memory, so floods of login requests cannot fill a table and block your own sign-in; each
   challenge works once and for 5 minutes.
@@ -158,7 +166,7 @@ automated security tests but no external audit.
 ```
 
 A notification request passes, in order: client IP resolution (forwarding header only from the
-configured proxy) → CIDR allowlist → brute-force block check → API key verification → scope check →
+configured proxy) → CIDR allowlist → API key verification (failures count toward a per-client block) → scope check →
 per-key and global rate limits → kill switches → body read (≤ 8 KiB) and strict validation →
 per-device encryption and delivery → response with delivery summary. Details, module layout, data
 model and the threat model are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The API contract
@@ -355,8 +363,12 @@ curl -sS https://notify.home.example/api/v1/notifications \
 
 Fields: `title` (≤ 200 chars, single line), `message` (≤ 2000 chars), optional `priority`
 (`low` | `normal` | `high`), `tag` (`[A-Za-z0-9_-]{1,32}`), `ttl` (seconds). Unknown fields, URLs,
-actions or HTML are rejected or never interpreted; text is displayed as plain text. The encoded
-notification must fit 3 KiB (Web Push limit) or the API returns `413`.
+actions or HTML are rejected or never interpreted; text is displayed as plain text, and control,
+invisible-format and line-separator characters are rejected. The notification title always starts
+with the sending key's name (`backup-job: Backup finished`), so one service cannot pose as another.
+A `tag` only replaces notifications of the same service (the key and its rotated successors); it is
+scoped and hashed before it reaches the push service. The encoded notification must fit 3 KiB
+(Web Push limit) or the API returns `413`.
 
 Response: `{"id":"…","status":"delivered|partial|failed|no_devices|filtered","devices":{…}}`.
 `status: failed` is returned with HTTP 502 so senders can retry. Errors use
@@ -371,7 +383,8 @@ Health card shows version, DB check, sending state, key/device counts and recent
 
 **Security events:** the app's *Security events* list (or the `audit_events` table) records key
 creation/rotation/revocation, logins, enrollments, device changes, rejected requests (throttled to
-one stored event per type and IP per minute; all are logged to stdout). Never contains keys, tokens,
+one stored event per type and client (IPv4 address or IPv6 /64) per minute and 60 in total per
+minute, the rest summarised as `audit.suppressed`; all are logged to stdout). Never contains keys, tokens,
 subscription data or notification content. Retention: `AUDIT_RETENTION_DAYS`.
 
 **Backup** (online, consistent):
@@ -390,7 +403,7 @@ are useless; without the VAPID key, devices must re-subscribe.
 ```bash
 docker compose stop pushgate
 docker run --rm --user 65532:65532 -v pushgate_pushgate-data:/data -v "$PWD/backups:/b:ro" \
-  busybox:1.37 sh -c 'rm -f /data/pushgate.db-wal /data/pushgate.db-shm && cp /b/backup-YYYY-MM-DD.db /data/pushgate.db'
+  busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e sh -c 'rm -f /data/pushgate.db-wal /data/pushgate.db-shm && cp /b/backup-YYYY-MM-DD.db /data/pushgate.db'
 docker compose start pushgate
 ```
 
@@ -403,6 +416,24 @@ docker compose up -d --build   # schema migrations run automatically at start
 docker compose ps
 ```
 
+Behaviour changes in the security hardening release (October 2026), to check when upgrading
+from an earlier version:
+
+- Notification titles start with the sending key's name (`backup-job: Backup finished`). Rename keys
+  whose names are not meant to be read on the lock screen.
+- Tags only replace notifications from the same service, and tags sent before the upgrade no longer
+  match new ones.
+- Titles and messages with invisible format characters (zero-width spaces, BOM, bidi marks) are
+  rejected with `400`. Emoji (including flags) and ZWNJ are allowed.
+- Adding/removing passkeys, creating/rotating API keys and registering devices need a passkey
+  confirmation from the last 5 minutes; sessions from before the upgrade confirm once.
+- Sign-ins and security-relevant changes are pushed to every device as high-priority alerts.
+- `TRUSTED_CIDRS`, `ADMIN_CIDRS` and `TRUSTED_PROXIES` ranges wider than `/8` (IPv4) or `/7` (IPv6)
+  stop pushgate from starting.
+- The image's `/data` directory is created mode `0700` (owned by uid 65532), so a new volume
+  can no longer be listed by other users. The database files themselves were already `0600`.
+- Request paths that are not canonical (`\`, `..`, absolute URLs) get `400`.
+
 Base images are pinned by digest; update tag + digest in `Dockerfile`/`compose.yaml` deliberately,
 then run `npm run test:container` and `npm run scan:image`.
 
@@ -413,8 +444,8 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
 
 | Situation | Action |
 |---|---|
-| Lost/broken passkey | `pg-cli enroll-token`, enroll a new passkey in the app, remove the old one under *Passkeys*. |
-| Admin session possibly stolen | `pg-cli sessions revoke-all`, review *Security events*. |
+| Lost/broken passkey | `pg-cli enroll-token`, enroll a new passkey in the app (this signs out every other session), remove the old one under *Passkeys* or with `pg-cli passkeys list` / `pg-cli passkeys remove <id>`. |
+| Admin session possibly stolen | `pg-cli sessions revoke-all`, review *Security events* and `pg-cli passkeys list`; remove any passkey you do not recognise with `pg-cli passkeys remove <id>`. |
 | Service key leaked | `pg-cli keys revoke <id>` (or rotate). Other services are unaffected. |
 | Device lost | Remove it under *Devices* (or `pg-cli devices remove <id>`); remove its passkey if it held one. |
 | Host compromised | Treat everything as leaked: new `secrets/` (new pepper ⇒ recreate all keys; new VAPID key ⇒ re-subscribe devices), new passkeys, reinstall host. |

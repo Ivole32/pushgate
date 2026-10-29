@@ -149,8 +149,8 @@ test('the service worker shows content as plain text and never takes URLs from t
   });
 
   await push({ title: '<b>Alert</b>', body: '<a href="javascript:x">click</a>', service: 'svc', tag: 'disk', url: 'https://evil.example', actions: [{ action: 'x' }] });
-  assert.equal(shown[0].title, '<b>Alert</b>', 'title passed through verbatim as text');
-  assert.equal(shown[0].options.body, '<a href="javascript:x">click</a>\n— svc');
+  assert.equal(shown[0].title, 'svc: <b>Alert</b>', 'title passed through verbatim as text, led by the sender');
+  assert.equal(shown[0].options.body, '<a href="javascript:x">click</a>');
   assert.equal(shown[0].options.tag, 'disk');
   assert.ok(!('actions' in shown[0].options));
   assert.ok(!JSON.stringify(shown[0].options).includes('evil.example'));

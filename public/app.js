@@ -42,6 +42,9 @@ async function api(method, path, body) {
   if (!res.ok) {
     const err = new Error(data?.error?.message || `Request failed (${res.status})`);
     err.status = res.status;
+    // Sensitive changes need a recent passkey confirmation. WebAuthn needs a fresh tap on iOS,
+    // so ask for one instead of starting the ceremony from here.
+    if (data?.error?.code === 'reauth_required') $('reauth').hidden = false;
     throw err;
   }
   return data;
@@ -345,6 +348,7 @@ function show(view) {
   $('enroll').hidden = view !== 'login';
   $('admin').hidden = view !== 'admin';
   $('logout').hidden = view !== 'admin';
+  if (view !== 'admin') $('reauth').hidden = true;
 }
 
 async function boot() {
@@ -365,14 +369,24 @@ async function boot() {
   }
 }
 
-$('login-btn').addEventListener('click', guarded(async () => {
-  const { challenge_id, options } = await api('POST', '/admin/api/login/options', {});
+async function getAssertion(optionsPath) {
+  const { challenge_id, options } = await api('POST', optionsPath, {});
   const cred = await navigator.credentials.get({
     publicKey: { ...options, challenge: b64urlToBytes(options.challenge), allowCredentials: [] },
   });
-  const r = await api('POST', '/admin/api/login/verify', { challenge_id, response: assertionJSON(cred) });
+  return { challenge_id, response: assertionJSON(cred) };
+}
+
+$('login-btn').addEventListener('click', guarded(async () => {
+  const r = await api('POST', '/admin/api/login/verify', await getAssertion('/admin/api/login/options'));
   csrf = r.csrf_token;
   await boot();
+}));
+
+$('reauth-btn').addEventListener('click', guarded(async () => {
+  await api('POST', '/admin/api/reauth/verify', await getAssertion('/admin/api/reauth/options'));
+  $('reauth').hidden = true;
+  flash('Confirmed. Repeat the change now.');
 }));
 
 $('enroll-form').addEventListener('submit', guarded(async (event) => {

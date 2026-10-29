@@ -6,9 +6,15 @@
 //   array:   items (field spec), maxItems
 //   object:  fields (map of field specs)
 
-// C0/C1 control characters and Unicode bidi overrides/isolates (which can disguise text).
-const CONTROL = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F‪-‮⁦-⁩]/;
-const CONTROL_SINGLE_LINE = /[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/;
+// Characters that can disguise text: controls (Cc), invisible format characters such as bidi
+// marks/overrides/isolates, zero-width spaces and BOM (Cf), and the line/paragraph separators
+// U+2028/U+2029, which break "single-line" fields. A single ZWJ or ZWNJ stays allowed (emoji
+// sequences; Persian and Indic spelling), but not a run of them, which could encode hidden bits.
+// Tag characters are invisible text except in the three standard subdivision flags (England,
+// Scotland, Wales).
+const CONTROL = /(?![\n\t\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|[\u200C\u200D]{2}/u;
+const CONTROL_SINGLE_LINE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|[\u200C\u200D]{2}/u;
+const FLAG_TAG_SEQUENCE = /\u{1F3F4}(?:\u{E0067}\u{E0062}(?:\u{E0065}\u{E006E}\u{E0067}|\u{E0073}\u{E0063}\u{E0074}|\u{E0077}\u{E006C}\u{E0073}))\u{E007F}/gu;
 
 function check(value, spec, path, errors) {
   switch (spec.type) {
@@ -17,7 +23,7 @@ function check(value, spec, path, errors) {
       const len = [...value].length;
       if (spec.minLength !== undefined && len < spec.minLength) return errors.push({ field: path, issue: `must be at least ${spec.minLength} characters` });
       if (spec.maxLength !== undefined && len > spec.maxLength) return errors.push({ field: path, issue: `must be at most ${spec.maxLength} characters` });
-      if ((spec.multiline ? CONTROL : CONTROL_SINGLE_LINE).test(value)) return errors.push({ field: path, issue: 'contains control characters' });
+      if ((spec.multiline ? CONTROL : CONTROL_SINGLE_LINE).test(value.replace(FLAG_TAG_SEQUENCE, ''))) return errors.push({ field: path, issue: 'contains control characters' });
       if (spec.enum && !spec.enum.includes(value)) return errors.push({ field: path, issue: `must be one of: ${spec.enum.join(', ')}` });
       if (spec.pattern && !spec.pattern.test(value)) return errors.push({ field: path, issue: 'has an invalid format' });
       return;

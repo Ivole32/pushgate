@@ -154,7 +154,7 @@ test('an admin can register, update, test and remove devices; secrets are never 
   assert.equal(upd.json.device.min_priority, 'high');
   const tp = await t.request({ method: 'POST', path: '/admin/api/test-push', headers: s.headers, body: { device_id: id } });
   assert.equal(tp.json.status, 'delivered');
-  assert.equal(t.push.calls.length, 1);
+  assert.equal(t.push.calls.filter((c) => JSON.parse(c.payload).title === 'Pushgate test').length, 1);
   assert.equal((await t.request({ method: 'DELETE', path: `/admin/api/devices/${id}`, headers: s.headers })).status, 200);
   assert.equal(t.ctx.devices.get(id), null);
 });
@@ -272,8 +272,9 @@ test('static files carry a strict CSP and security headers', async () => {
   assert.equal(r.headers['x-content-type-options'], 'nosniff');
   assert.equal(r.headers['x-frame-options'], 'DENY');
   assert.match(r.headers['strict-transport-security'], /max-age=/);
-  assert.equal((await t.request({ path: '/../package.json' })).status, 404);
-  assert.equal((await t.request({ path: '/%2e%2e/package.json' })).status, 404);
+  // Non-canonical paths are refused before routing.
+  assert.equal((await t.request({ path: '/../package.json' })).status, 400);
+  assert.equal((await t.request({ path: '/%2e%2e/package.json' })).status, 400);
   assert.equal((await t.request({ path: '/manifest.webmanifest' })).headers['content-type'], 'application/manifest+json; charset=utf-8');
 });
 

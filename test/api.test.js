@@ -119,6 +119,13 @@ test('request size and schema limits are enforced', async () => {
     { title: 'a\u0000b', message: 'b' },
     { title: 'a\nb', message: 'b' },
     { title: 'a‮b', message: 'b' },
+    // Invisible or line-breaking characters that could disguise who sent what.
+    { title: 'a b', message: 'b' },
+    { title: 'a', message: 'b c' },
+    { title: 'a‎b', message: 'b' },
+    { title: 'a​b', message: 'b' },
+    { title: 'a؜b', message: 'b' },
+    { title: 'a', message: '﻿b' },
     { title: 5, message: 'b' },
     { title: 'a', message: 'b', __proto__x: 1 },
   ];
@@ -132,12 +139,35 @@ test('request size and schema limits are enforced', async () => {
   assert.equal(huge.status, 413);
   assert.equal(t.push.calls.length, 0, 'nothing invalid was delivered');
 
-  const ok = await post({ body: { title: 'Disk', message: 'line 1\nline 2', priority: 'high', tag: 'disk-alert', ttl: 600 } });
+  const ok = await post({ body: { title: 'Disk 👨‍👩‍👧', message: 'line 1\nline 2\tend', priority: 'high', tag: 'disk-alert', ttl: 600 } });
   assert.equal(ok.status, 200);
   assert.equal(ok.json.status, 'delivered');
   assert.equal(t.push.calls[0].options.urgency, 'high');
   assert.equal(t.push.calls[0].options.TTL, 600);
-  assert.equal(t.push.calls[0].options.topic, 'disk-alert');
+  // The tag is scoped to the service and blinded before it reaches the push service.
+  assert.match(t.push.calls[0].options.topic, /^[A-Za-z0-9_-]{32}$/);
+  assert.equal(JSON.parse(t.push.calls[0].payload).tag, t.push.calls[0].options.topic);
+});
+
+test('format characters that real text needs are accepted, hidden tag text is not', async () => {
+  const t = await app();
+  addDevice(t);
+  const { key } = t.ctx.keys.create({ name: 'svc' });
+  // ZWNJ (Persian and Indic spelling) and an emoji subdivision flag (tag characters).
+  const flag = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}';
+  assert.equal((await notify(t, key, { title: `England ${flag}`, message: 'می\u200Cخواهم' })).status, 200);
+  // Tag characters outside a complete flag are invisible text.
+  for (const body of [
+    { title: 'a\u{E0061}b', message: 'b' },
+    { title: 'a', message: '\u{1F3F4}\u{E0067}\u{E0062}' },
+    { title: 'a', message: `${flag}\u{E0061}` },
+    // A made-up "flag" carrying a hidden message, and runs of zero-width joiners (hidden bits).
+    { title: 'a', message: `\u{1F3F4}${[...'hiddentext'].map((c) => String.fromCodePoint(0xE0000 + c.codePointAt(0))).join('')}\u{E007F}` },
+    { title: 'a\u200C\u200Db', message: 'b' },
+    { title: 'a', message: 'b\u200D\u200Dc' },
+  ]) {
+    assert.equal((await notify(t, key, body)).status, 400, JSON.stringify(body));
+  }
 });
 
 test('high priority requires the high-priority scope', async () => {
@@ -166,13 +196,19 @@ test('rate limits apply per service and globally', async () => {
   assert.equal((await notify(t, b)).status, 429);
 });
 
-test('repeated authentication failures block the client', async () => {
+test('repeated authentication failures block further failures, but never a valid key', async () => {
   const t = await app({ env: { AUTH_FAILURE_LIMIT: '3' } });
+  addDevice(t);
   const { key } = t.ctx.keys.create({ name: 'svc' });
   for (let i = 0; i < 3; i++) assert.equal((await notify(t, 'pgk_bad')).status, 401);
-  const r = await notify(t, key);
-  assert.equal(r.status, 429, 'blocked even with a valid key');
-  assert.ok(t.ctx.audit.list().some((e) => e.type === 'auth.blocked'));
+  const r = await notify(t, 'pgk_bad');
+  assert.equal(r.status, 429, 'further failures are refused');
+  assert.ok(Number(r.headers['retry-after']) >= 1);
+  // A neighbour's bad requests (same NAT, /64 or host) must not silence a legitimate sender.
+  assert.equal((await notify(t, key)).status, 200, 'a valid key is still served');
+  assert.equal((await notify(t, 'pgk_bad')).status, 429, 'the block stays in place');
+  const types = t.ctx.audit.list().map((e) => e.type);
+  assert.ok(types.includes('auth.blocked') && types.includes('auth.valid_key_while_blocked'));
 });
 
 test('revoking a key takes effect immediately and does not affect other keys', async () => {
@@ -290,5 +326,5 @@ test('a successful request does not reset the failure counter for that client', 
   assert.equal((await notify(t, 'pgk_bad')).status, 401);
   assert.equal((await notify(t, key)).status, 200);
   assert.equal((await notify(t, 'pgk_bad')).status, 401);
-  assert.equal((await notify(t, key)).status, 429, 'third failure in the window blocks the client');
+  assert.equal((await notify(t, 'pgk_bad')).status, 429, 'third failure in the window blocks the client');
 });
