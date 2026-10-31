@@ -510,6 +510,13 @@ node --env-file=.env.development src/cli.js enroll-token
 Only `http://localhost` is accepted as a non-HTTPS origin; all other checks (CIDRs, keys, CSRF,
 CSP, cookies) are identical to production.
 
+### Plugins
+
+The self-hosted edition needs no plugins. Other editions (for example a hosted one kept in a
+separate repository) start pushgate with `run({ plugins: [...] })` and can replace services such
+as rate limiting or the push transport, add checks before and after sending, extra routes,
+feature flags and their own tables. See [docs/PLUGINS.md](docs/PLUGINS.md).
+
 ### Tests and security checks
 
 ```bash

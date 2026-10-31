@@ -59,14 +59,14 @@ export function fakeSend(script = () => ({ statusCode: 201 })) {
   return { send, calls };
 }
 
-export async function startApp({ env = {}, script, dir = tempDir(), secrets } = {}) {
+export async function startApp({ env = {}, script, dir = tempDir(), secrets, plugins } = {}) {
   const s = secrets ?? writeSecrets(dir);
   const config = loadConfig(baseEnv(dir, s, env));
   const logs = [];
   const log = createLogger({ level: 'debug', sink: (l) => logs.push(l) });
   const db = openDatabase(config.dataDir);
   const push = fakeSend(script);
-  const app = createApp({ config, db, log, send: push.send });
+  const app = createApp({ config, db, log, send: push.send, plugins });
   const server = createServer(app);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;

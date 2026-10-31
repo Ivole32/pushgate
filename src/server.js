@@ -1,4 +1,5 @@
 // Process entry point: configuration, HTTP server, periodic maintenance, graceful shutdown.
+// `run` is also the entry point for other editions: `run({ plugins: [...] })` (see docs/PLUGINS.md).
 import http from 'node:http';
 import { createApp, VERSION } from './app.js';
 import { ConfigError, loadConfig } from './config.js';
@@ -16,7 +17,7 @@ export function createServer(app) {
   return server;
 }
 
-function main() {
+export function run({ plugins = [] } = {}) {
   // The database and its WAL/SHM side files hold subscription secrets: create them private.
   process.umask(0o077);
   let config;
@@ -29,7 +30,16 @@ function main() {
   }
   const log = createLogger({ level: config.logLevel });
   const db = openDatabase(config.dataDir);
-  const app = createApp({ config, db, log });
+  let app;
+  try {
+    app = createApp({ config, db, log, plugins });
+  } catch (err) {
+    // Plugin problems are reported like configuration errors and abort startup.
+    process.stderr.write(`${err instanceof ConfigError ? err.message : 'Failed to start'}\n`);
+    if (!(err instanceof ConfigError)) log.error('startup failed', safeError(err));
+    db.close();
+    process.exit(1);
+  }
   const server = createServer(app);
 
   purgeExpired(db, config);
@@ -51,6 +61,7 @@ function main() {
       admin_cidrs: config.adminPublic ? 'PUBLIC (ADMIN_PUBLIC=true)' : config.adminCidrs.map((c) => c.text),
       trusted_proxies: config.trustedProxies.map((c) => c.text),
       notifications_enabled: config.notificationsEnabled,
+      plugins: app.ctx.plugins,
       admin_configured: app.ctx.auth.hasAdmin(),
     });
     if (config.adminPublic) {
@@ -90,4 +101,4 @@ function main() {
   process.on('unhandledRejection', (err) => log.error('unhandled rejection', safeError(err)));
 }
 
-if (import.meta.main) main();
+if (import.meta.main) run();

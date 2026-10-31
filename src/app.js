@@ -1,14 +1,19 @@
 // Request pipeline: request id → security headers → client resolution → network ACL → route.
+// Plugins (src/plugins.js) can replace services and add hooks and routes; without them the
+// built-in defaults below apply.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createApiKeys } from './apikeys.js';
 import { createAudit } from './audit.js';
+import { ConfigError } from './config.js';
+import { migratePlugins } from './db.js';
 import { createDevices } from './devices.js';
-import { HttpError, errors, sendError, sendJson, setSecurityHeaders } from './http.js';
+import { HttpError, errors, sendError, sendJson, sendResult, setSecurityHeaders } from './http.js';
 import { safeError } from './log.js';
 import { ipInCidrs, isLoopback, normalizeIp, resolveClient } from './netacl.js';
 import { createNotifyHandler } from './notify.js';
+import { resolvePlugins } from './plugins.js';
 import { createPusher } from './push.js';
 import { createFailureLimiter, createRateLimiter } from './ratelimit.js';
 import { loadStatic, serveStatic } from './static.js';
@@ -18,28 +23,65 @@ import { createAdminRoutes } from './admin/routes.js';
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 export const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-export function createApp({ config, db, log, send }) {
+// `send` replaces the push transport like a plugin would (used by the tests).
+export function createApp({ config, db, log, send, plugins = [] }) {
+  const ext = resolvePlugins(plugins);
+  migratePlugins(db, ext.migrations);
+  const services = { rateLimiter: createRateLimiter, failureLimiter: createFailureLimiter, transport: send, ...ext.services };
+
+  // Who may reach the sending API before any key is looked at: TRUSTED_CIDRS, unless a plugin
+  // replaces the check (it gets the default as `fallback`). Only an explicit `true` allows.
+  const defaultApiAccess = (client) => ipInCidrs(client.ip, config.trustedCidrs);
+  let apiAccess = defaultApiAccess;
+  if (ext.services.apiAccess) {
+    log.warn('sending API network check replaced by a plugin', { plugin: ext.owners.apiAccess });
+    apiAccess = (client) => ext.services.apiAccess(client, { config, fallback: defaultApiAccess }) === true;
+  }
+
   const audit = createAudit(db, log);
   const keys = createApiKeys(db, config.pepper);
   const devices = createDevices(db);
   const auth = createAdminAuth({ db, config });
-  const pusher = createPusher({ config, db, devices, audit, log, ...(send ? { send } : {}) });
+  const pusher = createPusher({ config, db, devices, audit, log, ...(services.transport ? { send: services.transport } : {}) });
   const failureWindow = { windowMs: 10 * 60000, blockMs: config.authBlockMinutes * 60000 };
   const limits = {
-    perKey: createRateLimiter(config.rateLimitPerKeyPerMinute),
-    global: createRateLimiter(config.rateLimitGlobalPerMinute),
-    apiFailures: createFailureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
-    adminFailures: createFailureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
-    adminAnonymous: createRateLimiter(config.rateLimitAdminAnonymousPerMinute),
+    perKey: services.rateLimiter(config.rateLimitPerKeyPerMinute),
+    global: services.rateLimiter(config.rateLimitGlobalPerMinute),
+    apiFailures: services.failureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
+    adminFailures: services.failureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
+    adminAnonymous: services.rateLimiter(config.rateLimitAdminAnonymousPerMinute),
   };
-  const ctx = { config, db, log, audit, keys, devices, auth, pusher, limits, version: VERSION, startedAt: Date.now() };
+  const ctx = {
+    config, db, log, audit, keys, devices, auth, pusher, limits,
+    hooks: ext.hooks, features: ext.features, plugins: ext.names, version: VERSION, startedAt: Date.now(),
+  };
   const handleNotify = createNotifyHandler(ctx);
-  const handleAdmin = createAdminRoutes(ctx);
+  const admin = createAdminRoutes(ctx);
   const files = loadStatic(PUBLIC_DIR);
   const hsts = config.publicOrigin.startsWith('https:');
 
+  // Plugin routes match exact paths and may not hide the web app's files.
+  const extRoutes = new Map();
+  for (const r of ext.routes) {
+    if (files.has(r.path)) throw new ConfigError(`plugin "${r.plugin}": route path "${r.path}" is a web app file`);
+    const same = extRoutes.get(r.path) ?? [];
+    if (same.some((o) => o.zone !== r.zone)) throw new ConfigError(`plugin "${r.plugin}": all methods of route path "${r.path}" need the same zone`);
+    extRoutes.set(r.path, [...same, r]);
+  }
+
   // PWA/admin zone: the configured admin networks, or everyone with the explicit ADMIN_PUBLIC opt-in.
   const adminAllowed = (ip) => config.adminPublic || ipInCidrs(ip, config.adminCidrs);
+
+  async function handleExtension(req, res, url, client, candidates) {
+    const route = candidates.find((r) => r.method === req.method);
+    if (!route) throw errors.methodNotAllowed();
+    const session = admin.authorize(req, client, {
+      auth: route.auth === 'none' ? false : undefined,
+      fresh: route.auth === 'fresh',
+      crossOrigin: route.crossOrigin,
+    });
+    sendResult(res, await route.handler({ req, res, url, client, session, ctx }));
+  }
 
   function reject(res, requestId, client, zone, reason) {
     audit.recordThrottled('network.rejected', { ip: client.ip ?? client.peer, detail: { zone, reason } });
@@ -62,15 +104,20 @@ export function createApp({ config, db, log, send }) {
 
     // Sending API: only the configured sender networks.
     if (pathname.startsWith('/api/')) {
-      if (!ipInCidrs(client.ip, config.trustedCidrs)) return reject(res, requestId, client, 'api', 'cidr');
+      if (!apiAccess(client)) return reject(res, requestId, client, 'api', 'cidr');
       if (pathname !== '/api/v1/notifications') throw errors.notFound();
       if (req.method !== 'POST') throw errors.methodNotAllowed();
       return handleNotify(req, res, client);
     }
 
+    // Plugin routes: "public" ones from every network, "app" ones like the web app.
+    const candidates = extRoutes.get(pathname);
+    if (candidates && candidates[0].zone === 'public') return handleExtension(req, res, url, client, candidates);
+
     // Everything else (PWA and admin API).
     if (!adminAllowed(client.ip)) return reject(res, requestId, client, 'admin', 'cidr');
-    if (pathname.startsWith('/admin/api/')) return handleAdmin(req, res, url, client);
+    if (candidates) return handleExtension(req, res, url, client, candidates);
+    if (pathname.startsWith('/admin/api/')) return admin.handle(req, res, url, client);
     if (req.method !== 'GET' && req.method !== 'HEAD') throw errors.methodNotAllowed();
     if (!serveStatic(files, req, res, pathname)) throw errors.notFound();
   }

@@ -2,13 +2,14 @@
 import { SCOPES } from './apikeys.js';
 import { getSetting } from './db.js';
 import { HttpError, errors, readJson, sendJson } from './http.js';
+import { safeError } from './log.js';
 import { clientKey } from './netacl.js';
 import { DEFAULT_TTL } from './push.js';
 import { schemas, validate } from './validate.js';
 
 export const NOTIFICATION_BODY_LIMIT = 8192;
 
-export function createNotifyHandler({ config, db, keys, auth, pusher, audit, limits }) {
+export function createNotifyHandler({ config, db, log, keys, auth, pusher, audit, limits, hooks }) {
   return async function handleNotify(req, res, client) {
     const ip = client.ip;
     const who = clientKey(ip);
@@ -67,6 +68,11 @@ export function createNotifyHandler({ config, db, keys, auth, pusher, audit, lim
     if (priority === 'high' && !key.scopes.includes(SCOPES.SEND_HIGH)) {
       throw new HttpError(403, 'insufficient_scope', 'This key may not send high priority notifications');
     }
+    const ttl = body.ttl ?? DEFAULT_TTL;
+
+    // 6. Plugin checks (e.g. quotas). They may only refuse: an HttpError is the response, any
+    // other error a 500. Either way nothing is sent. Hooks never see title or message.
+    for (const { fn } of hooks.beforeSend) await fn({ key, client, notification: { priority, ttl } });
 
     const outcome = await pusher.deliver({
       keyId: key.id,
@@ -75,11 +81,20 @@ export function createNotifyHandler({ config, db, keys, auth, pusher, audit, lim
       priority,
       tag: body.tag ?? null,
       tagScope: keys.lineage(key.id),
-      ttl: body.ttl ?? DEFAULT_TTL,
+      ttl,
       service: key.name,
     });
     if (outcome.error === 'payload_too_large') {
       throw new HttpError(413, 'payload_too_large', 'Notification exceeds the Web Push payload limit; shorten title or message');
+    }
+    // 7. Plugin follow-ups (e.g. metering). The notification is out already, so a failing hook
+    // is logged and does not change the response (an error would make the sender send again).
+    for (const { plugin, fn } of hooks.afterDelivery) {
+      try {
+        await fn({ key, client, outcome });
+      } catch (err) {
+        log.error('plugin afterDelivery hook failed', { plugin, ...safeError(err) });
+      }
     }
     sendJson(res, outcome.status === 'failed' ? 502 : 200, outcome);
   };

@@ -8,7 +8,7 @@ import { getSetting, setSetting } from '../db.js';
 import { checkSubscription } from '../devices.js';
 import { safeError } from '../log.js';
 import { clientKey } from '../netacl.js';
-import { HttpError, errors, readJson, sendJson } from '../http.js';
+import { HttpError, errors, readJson, sendResult } from '../http.js';
 import { schemas, validate } from '../validate.js';
 import { PASSKEY_ID, SESSION_COOKIE, readCookie, sessionCookie } from './auth.js';
 
@@ -28,7 +28,7 @@ async function body(req, schema) {
   return data;
 }
 
-export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth, audit, limits, version, startedAt }) {
+export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth, audit, limits, features, version, startedAt }) {
   const sessionMaxAge = config.sessionMaxHours * 3600;
 
   // Out-of-band alert to every device, so a change made with a stolen session does not go
@@ -93,8 +93,8 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
   const routes = [
     ['GET', /^\/admin\/api\/session$/, { auth: false }, ({ req }) => {
       const session = auth.getSession(readCookie(req, SESSION_COOKIE));
-      if (!session) return { authenticated: false, setup_complete: auth.hasAdmin() };
-      return { authenticated: true, setup_complete: true, csrf_token: session.csrf, expires_at: session.expiresAt };
+      if (!session) return { authenticated: false, setup_complete: auth.hasAdmin(), features };
+      return { authenticated: true, setup_complete: true, csrf_token: session.csrf, expires_at: session.expiresAt, features };
     }],
 
     // ---- first administrator / recovery enrollment (one-time token from the CLI) ----
@@ -306,14 +306,11 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
     return audit.list({ limit: 100, before: b });
   }
 
-  // Handles a request under /admin/api/; throws HttpError for any rejection.
-  return async function handleAdmin(req, res, url, client) {
-    const matching = routes.filter(([, re]) => re.test(url.pathname));
-    if (matching.length === 0) throw errors.notFound();
-    const route = matching.find(([method]) => method === req.method);
-    if (!route) throw errors.methodNotAllowed();
-    const [, re, opts, handler] = route;
-    if (req.method !== 'GET') requireSameOrigin(req);
+  // Access checks for one route, shared with plugin routes: same-origin for every change
+  // (unless a route explicitly accepts cross-site requests), then either the per-client limit
+  // for anonymous endpoints or a session with CSRF token, and a recent passkey if `fresh`.
+  function authorize(req, client, opts) {
+    if (req.method !== 'GET' && !opts.crossOrigin) requireSameOrigin(req);
     if (opts.auth === false) {
       // Endpoints anyone can call (session check, login, enrollment) are rate limited per client
       // inside the app, independent of any reverse proxy configuration.
@@ -322,11 +319,23 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
         audit.recordThrottled('rate_limited', { ip: client.ip, detail: { limit: 'admin_anonymous' } });
         throw errors.rateLimited(wait);
       }
+      return null;
     }
-    const session = opts.auth === false ? null : requireSession(req, client);
+    const session = requireSession(req, client);
     if (opts.fresh && !auth.recentlyVerified(session)) {
       throw new HttpError(403, 'reauth_required', 'Confirm with your passkey to make this change');
     }
+    return session;
+  }
+
+  // Handles a request under /admin/api/; throws HttpError for any rejection.
+  async function handle(req, res, url, client) {
+    const matching = routes.filter(([, re]) => re.test(url.pathname));
+    if (matching.length === 0) throw errors.notFound();
+    const route = matching.find(([method]) => method === req.method);
+    if (!route) throw errors.methodNotAllowed();
+    const [, re, opts, handler] = route;
+    const session = authorize(req, client, opts);
     const params = re.exec(url.pathname).slice(1).map((p) => {
       try {
         return decodeURIComponent(p);
@@ -334,8 +343,8 @@ export function createAdminRoutes({ config, db, log, keys, devices, pusher, auth
         throw errors.notFound();
       }
     });
-    const result = await handler({ req, res, url, client, session, params });
-    if (result && typeof result.status === 'number' && result.body) sendJson(res, result.status, result.body);
-    else sendJson(res, 200, result);
-  };
+    sendResult(res, await handler({ req, res, url, client, session, params }));
+  }
+
+  return { handle, authorize };
 }

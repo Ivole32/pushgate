@@ -67,6 +67,7 @@ Base images are pinned by digest.
 | `db.js` | SQLite connection, pragmas, migrations, retention purge, online backup |
 | `http.js`, `static.js` | Response helpers, security headers, bounded body reader, static PWA files |
 | `app.js`, `server.js`, `cli.js` | Request pipeline, process lifecycle and signals, administrative CLI |
+| `plugins.js`, `index.js` | Plugin checks and merging ([PLUGINS.md](PLUGINS.md)); the public API for editions built on pushgate |
 
 ## Data model (SQLite)
 

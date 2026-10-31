@@ -118,6 +118,23 @@ function migrate(db) {
   }
 }
 
+// Plugin tables are migrated after the core schema, tracked per plugin, each step in its own
+// transaction. Steps are append-only, exactly like MIGRATIONS above.
+export function migratePlugins(db, pluginMigrations) {
+  if (!pluginMigrations.length) return;
+  db.exec(`CREATE TABLE IF NOT EXISTS plugin_migrations (
+    plugin TEXT NOT NULL, version INTEGER NOT NULL, applied_at INTEGER NOT NULL, PRIMARY KEY (plugin, version))`);
+  for (const { plugin, steps } of pluginMigrations) {
+    const current = db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM plugin_migrations WHERE plugin = ?').get(plugin).v;
+    for (let i = current; i < steps.length; i++) {
+      transaction(db, () => {
+        db.exec(steps[i]);
+        db.prepare('INSERT INTO plugin_migrations (plugin, version, applied_at) VALUES (?, ?, ?)').run(plugin, i + 1, Date.now());
+      });
+    }
+  }
+}
+
 export function transaction(db, fn) {
   db.exec('BEGIN IMMEDIATE');
   try {

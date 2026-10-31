@@ -58,6 +58,14 @@ export function sendJson(res, status, body, headers = {}) {
   res.end(data);
 }
 
+// Route handler results: a value is sent as 200 JSON, `{ status, body }` with that status.
+// Handlers that wrote the response themselves return nothing after doing so.
+export function sendResult(res, result) {
+  if (res.headersSent || res.writableEnded) return;
+  if (result && typeof result.status === 'number' && result.body) sendJson(res, result.status, result.body);
+  else sendJson(res, 200, result);
+}
+
 export function sendError(res, err, requestId) {
   const headers = {};
   if (err.extra?.retryAfter) headers['Retry-After'] = String(err.extra.retryAfter);

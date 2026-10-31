@@ -37,7 +37,7 @@ test('administrative endpoints require an authenticated session', async () => {
     assert.equal(r.status, 401, `${method} ${path}`);
   }
   const s = await t.request({ path: '/admin/api/session' });
-  assert.deepEqual(s.json, { authenticated: false, setup_complete: false });
+  assert.deepEqual(s.json, { authenticated: false, setup_complete: false, features: {} });
 });
 
 test('service API keys cannot manage credentials, devices or settings', async () => {
