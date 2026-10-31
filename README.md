@@ -152,7 +152,7 @@ send notifications, or register a device without logging in.
 **What this does not protect against:** someone who controls the server itself (they can read the
 secrets and send anything), someone who has your unlocked iPhone with the passkey, and a large
 denial-of-service attack (that is your hosting provider's / a CDN's job). The code has thorough
-automated security tests but no external audit.
+automated security tests but no external audit. Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Architecture
 
@@ -416,24 +416,6 @@ docker compose up -d --build   # schema migrations run automatically at start
 docker compose ps
 ```
 
-Behaviour changes in the security hardening release (October 2026), to check when upgrading
-from an earlier version:
-
-- Notification titles start with the sending key's name (`backup-job: Backup finished`). Rename keys
-  whose names are not meant to be read on the lock screen.
-- Tags only replace notifications from the same service, and tags sent before the upgrade no longer
-  match new ones.
-- Titles and messages with invisible format characters (zero-width spaces, BOM, bidi marks) are
-  rejected with `400`. Emoji (including flags) and ZWNJ are allowed.
-- Adding/removing passkeys, creating/rotating API keys and registering devices need a passkey
-  confirmation from the last 5 minutes; sessions from before the upgrade confirm once.
-- Sign-ins and security-relevant changes are pushed to every device as high-priority alerts.
-- `TRUSTED_CIDRS`, `ADMIN_CIDRS` and `TRUSTED_PROXIES` ranges wider than `/8` (IPv4) or `/7` (IPv6)
-  stop pushgate from starting.
-- The image's `/data` directory is created mode `0700` (owned by uid 65532), so a new volume
-  can no longer be listed by other users. The database files themselves were already `0600`.
-- Request paths that are not canonical (`\`, `..`, absolute URLs) get `400`.
-
 Base images are pinned by digest; update tag + digest in `Dockerfile`/`compose.yaml` deliberately,
 then run `npm run test:container` and `npm run scan:image`.
 
@@ -453,10 +435,6 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
 
 ## Troubleshooting the deployment
 
-- **`Cannot read package config /app/package.json: permission denied`** (container keeps
-  restarting): older images copied the checkout's permission bits, so a checkout made with
-  `umask 077` was unreadable by the runtime user. Update and rebuild:
-  `git pull && docker compose up -d --build`.
 - **`API key pepper file is unreadable`** (or VAPID key) at startup: the message shows the file's
   uid and mode as seen inside the container. Apply the supported layout and recreate:
   `scripts/gen-secrets.sh --fix-permissions && docker compose up -d --force-recreate`
@@ -512,10 +490,10 @@ CSP, cookies) are identical to production.
 
 ### Plugins
 
-The self-hosted edition needs no plugins. Other editions (for example a hosted one kept in a
-separate repository) start pushgate with `run({ plugins: [...] })` and can replace services such
-as rate limiting or the push transport, add checks before and after sending, extra routes,
-feature flags and their own tables. See [docs/PLUGINS.md](docs/PLUGINS.md).
+Pushgate needs no plugins to run. A program that embeds it can start it with
+`run({ plugins: [...] })` to replace services such as rate limiting or the push transport, add
+checks before and after sending, extra routes, feature flags and its own tables. See
+[docs/PLUGINS.md](docs/PLUGINS.md).
 
 ### Tests and security checks
 

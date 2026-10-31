@@ -1,7 +1,6 @@
-// Plugin system. Without plugins pushgate runs with its built-in defaults (the self-hosted
-// edition). A plugin is a plain object that replaces a service, adds hooks, HTTP routes,
-// feature flags for the web app, or its own database tables; a separately maintained edition
-// (for example a hosted one) is a program that passes its plugins to `run`/`createApp`.
+// Plugin system. Without plugins pushgate runs with its built-in defaults. A plugin is a plain
+// object that replaces a service, adds hooks, HTTP routes, feature flags for the web app, or its
+// own database tables; a program that embeds pushgate passes its plugins to `run`/`createApp`.
 // Plugins are trusted code chosen by that program: they are never loaded from configuration,
 // the database or requests. Everything is checked at startup, and any problem aborts it.
 import { ConfigError } from './config.js';

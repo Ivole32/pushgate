@@ -1,4 +1,4 @@
-// Public API for editions built on pushgate (see docs/PLUGINS.md). Everything else in src/ is
+// Public API for programs that embed pushgate (see docs/PLUGINS.md). Everything else in src/ is
 // internal and may change without notice; this list and the plugin API version are the contract.
 export { run, createServer } from './server.js';
 export { createApp, VERSION } from './app.js';

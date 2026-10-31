@@ -1,4 +1,4 @@
-// Regression tests for the findings of the October 2026 security audit.
+// Security regression tests: each one pins down an attack and the defence against it.
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -148,7 +148,7 @@ test('passkeys with unaddressable ids or invalid transports cannot be planted', 
   assert.equal((await addPasskey(t, h, junk, { transports: ['internal', 'x', 7, { a: 1 }, 'usb', 'usb'] })).status, 201);
   assert.equal(t.db.prepare('SELECT transports FROM passkeys WHERE id = ?').get(junk.id).transports, '["internal","usb"]');
 
-  // Rows stored by older versions are cleaned when echoed to the browser.
+  // Invalid rows already in the database are cleaned when echoed to the browser.
   t.db.prepare('UPDATE passkeys SET transports = ?').run('"x"');
   const o = await post(t, '/admin/api/passkeys/options', {}, h);
   assert.equal(o.status, 200);

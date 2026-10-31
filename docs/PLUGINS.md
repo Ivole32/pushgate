@@ -1,20 +1,19 @@
 # Plugins
 
-Pushgate runs with built-in defaults: that is the self-hosted edition, and it needs no plugins.
-A plugin replaces one of those defaults or adds behaviour on top of them. Another edition, for
-example a hosted one in a separate repository, is a small program that depends on pushgate and
-starts it with its plugins:
+Pushgate runs with built-in defaults and needs no plugins. A plugin replaces one of those
+defaults or adds behaviour on top of them. To use plugins, write a small program that depends on
+pushgate and starts it with them:
 
 ```js
-// server.js of another edition
+// server.js of your own program
 import { run } from 'pushgate';
-import cloud from './cloud-plugin.js';
+import quotas from './quotas-plugin.js';
 
-run({ plugins: [cloud] });
+run({ plugins: [quotas] });
 ```
 
-`run` is the same entry point the self-hosted container uses (configuration from the
-environment, maintenance, graceful shutdown), so the other edition only adds what is different.
+`run` is the same entry point the container uses (configuration from the environment,
+maintenance, graceful shutdown), so your program only adds what is different.
 Tests and custom servers can call `createApp({ config, db, log, plugins })` instead.
 
 Plugins are trusted code chosen by the program that starts the server. They are never loaded
@@ -41,7 +40,7 @@ The repository is `"private": true`, so it is not published to npm; depend on it
 import { HttpError, PLUGIN_API_VERSION } from 'pushgate';
 
 export default {
-  name: 'cloud',                     // lowercase letters, digits, dashes
+  name: 'quotas',                    // lowercase letters, digits, dashes
   apiVersion: PLUGIN_API_VERSION,
 
   services: {                        // replace built-in parts (at most one plugin each)
@@ -65,7 +64,7 @@ export default {
   features: { billing: true },       // flags for the web app
 
   migrations: [                      // own tables; append-only
-    'CREATE TABLE cloud_usage (key_id TEXT PRIMARY KEY, month TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE quotas_usage (key_id TEXT PRIMARY KEY, month TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)',
   ],
 };
 ```
@@ -128,14 +127,13 @@ the same flag is a startup error) and returned to the web app as `features` from
 `migrations` is an append-only list of SQL strings. Pushgate runs them after its own schema
 and records how many have run per plugin (table `plugin_migrations`), so each runs once.
 Add new steps at the end and never change existing ones. Prefix the tables with the plugin's
-name (`cloud_usage`), so they cannot collide with current or future core tables.
+name (`quotas_usage`), so they cannot collide with current or future core tables.
 
-## Not covered yet
+## Limitations
 
-- Accounts. Pushgate has one administrator and no `account_id` in its tables. A hosted
-  edition needs that in the core; a plugin cannot add it safely afterwards.
-- Replacing the sign-up and recovery flow. Plugin routes can add one, but the core
-  enrollment still uses the CLI token.
+- Pushgate has a single administrator; plugins cannot add separate accounts.
+- The first passkey is always enrolled with a one-time token from the CLI. Plugin routes can add
+  other flows next to it, not replace it.
 - Extending the web app. The session endpoint returns `features`, but the PWA does not use
   them yet and cannot load screens from plugins.
-- An asynchronous database (Postgres) and a delivery queue.
+- The database is SQLite and delivery is synchronous; neither can be replaced by a plugin.

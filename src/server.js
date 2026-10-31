@@ -1,5 +1,5 @@
 // Process entry point: configuration, HTTP server, periodic maintenance, graceful shutdown.
-// `run` is also the entry point for other editions: `run({ plugins: [...] })` (see docs/PLUGINS.md).
+// `run` is also the entry point for programs with plugins: `run({ plugins: [...] })` (see docs/PLUGINS.md).
 import http from 'node:http';
 import { createApp, VERSION } from './app.js';
 import { ConfigError, loadConfig } from './config.js';
