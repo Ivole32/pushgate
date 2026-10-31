@@ -1,6 +1,6 @@
-// POST /api/v1/notifications — the only endpoint that accepts service API keys.
+// POST /api/v1/notifications — the only endpoint that accepts service API keys. The key's
+// account decides which devices receive the notification.
 import { SCOPES } from './apikeys.js';
-import { getSetting } from './db.js';
 import { HttpError, errors, readJson, sendJson } from './http.js';
 import { safeError } from './log.js';
 import { clientKey } from './netacl.js';
@@ -9,7 +9,7 @@ import { schemas, validate } from './validate.js';
 
 export const NOTIFICATION_BODY_LIMIT = 8192;
 
-export function createNotifyHandler({ config, db, log, keys, auth, pusher, audit, limits, hooks }) {
+export function createNotifyHandler({ config, log, accounts, keys, auth, pusher, audit, limits, hooks }) {
   return async function handleNotify(req, res, client) {
     const ip = client.ip;
     const who = clientKey(ip);
@@ -32,12 +32,13 @@ export function createNotifyHandler({ config, db, log, keys, auth, pusher, audit
       audit.recordThrottled('auth.failed', { ip, detail: { reason: result.reason, key_id: result.keyId, blocked: nowBlocked } });
       throw errors.unauthorized();
     }
-    if (limits.apiFailures.blockedFor(who)) {
-      audit.recordThrottled('auth.valid_key_while_blocked', { actor: `key:${result.key.id}`, ip });
-    }
     const key = result.key;
+    const accountId = key.account_id;
+    if (limits.apiFailures.blockedFor(who)) {
+      audit.recordThrottled('auth.valid_key_while_blocked', { accountId, actor: `key:${key.id}`, ip });
+    }
     if (!key.scopes.includes(SCOPES.SEND)) {
-      audit.recordThrottled('auth.forbidden_scope', { actor: `key:${key.id}`, ip, detail: { scope: SCOPES.SEND } });
+      audit.recordThrottled('auth.forbidden_scope', { accountId, actor: `key:${key.id}`, ip, detail: { scope: SCOPES.SEND } });
       throw new HttpError(403, 'insufficient_scope', 'This key may not send notifications');
     }
     // Failures are deliberately not reset on success: holding one valid key must not allow
@@ -46,19 +47,19 @@ export function createNotifyHandler({ config, db, log, keys, auth, pusher, audit
     // 3. Rate limits: per key first, then global.
     const waitKey = limits.perKey.take(key.id);
     if (waitKey) {
-      audit.recordThrottled('rate_limited', { actor: `key:${key.id}`, ip, detail: { limit: 'key' } });
+      audit.recordThrottled('rate_limited', { accountId, actor: `key:${key.id}`, ip, detail: { limit: 'key' } });
       throw errors.rateLimited(waitKey);
     }
     const waitGlobal = limits.global.take('global');
     if (waitGlobal) {
-      audit.recordThrottled('rate_limited', { actor: `key:${key.id}`, ip, detail: { limit: 'global' } });
+      audit.recordThrottled('rate_limited', { accountId, actor: `key:${key.id}`, ip, detail: { limit: 'global' } });
       throw errors.rateLimited(waitGlobal);
     }
 
     // 4. Kill switches.
     if (!config.notificationsEnabled) throw errors.unavailable('Notification sending is disabled');
-    if (config.requireSetupBeforeSending && !auth.hasAdmin()) throw errors.unavailable('Initial setup is not complete');
-    if (getSetting(db, 'sending_paused') === 'true') throw errors.unavailable('Notification sending is paused');
+    if (config.requireSetupBeforeSending && !auth.hasAdmin(accountId)) throw errors.unavailable('Initial setup is not complete');
+    if (accounts.isPaused(accountId)) throw errors.unavailable('Notification sending is paused');
 
     // 5. Only now read and validate the body.
     const body = await readJson(req, NOTIFICATION_BODY_LIMIT);
@@ -72,9 +73,11 @@ export function createNotifyHandler({ config, db, log, keys, auth, pusher, audit
 
     // 6. Plugin checks (e.g. quotas). They may only refuse: an HttpError is the response, any
     // other error a 500. Either way nothing is sent. Hooks never see title or message.
-    for (const { fn } of hooks.beforeSend) await fn({ key, client, notification: { priority, ttl } });
+    const account = accounts.get(accountId);
+    for (const { fn } of hooks.beforeSend) await fn({ account, key, client, notification: { priority, ttl } });
 
     const outcome = await pusher.deliver({
+      accountId,
       keyId: key.id,
       title: body.title,
       message: body.message,
@@ -91,7 +94,7 @@ export function createNotifyHandler({ config, db, log, keys, auth, pusher, audit
     // is logged and does not change the response (an error would make the sender send again).
     for (const { plugin, fn } of hooks.afterDelivery) {
       try {
-        await fn({ key, client, outcome });
+        await fn({ account, key, client, outcome });
       } catch (err) {
         log.error('plugin afterDelivery hook failed', { plugin, ...safeError(err) });
       }

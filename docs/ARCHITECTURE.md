@@ -67,20 +67,26 @@ Base images are pinned by digest.
 | `db.js` | SQLite connection, pragmas, migrations, retention purge, online backup |
 | `http.js`, `static.js` | Response helpers, security headers, bounded body reader, static PWA files |
 | `app.js`, `server.js`, `cli.js` | Request pipeline, process lifecycle and signals, administrative CLI |
+| `accounts.js` | Accounts and the account-id guard used by every scoped data function |
 | `plugins.js`, `index.js` | Plugin checks and merging ([PLUGINS.md](PLUGINS.md)); the public API for programs that embed pushgate |
 
 ## Data model (SQLite)
 
 | Table | Contents | Secrets? |
 |---|---|---|
-| `api_keys` | public key id, name, description, **HMAC-SHA-256 of the key**, scopes, created/expires/revoked/last-used | hash only |
-| `passkeys` | WebAuthn credential id, public key, sign counter, name | public keys only |
-| `enrollment_tokens` | SHA-256 of one-time admin enrollment tokens, expiry, used time | hash only |
-| `sessions` | SHA-256 of session token, CSRF token, timestamps | hash only (CSRF token is not a credential on its own) |
-| `devices` | push endpoint, `p256dh`, `auth`, name, minimum priority, delivery stats | **yes**: subscription secrets, never returned by any API |
-| `deliveries` | id, key id, priority, counts, status — **no title/message** | no |
-| `audit_events` | type, actor, client IP, small JSON detail | no |
-| `settings` | `sending_paused`, WebAuthn user handle | no |
+| `accounts` | id, name, per-account pause switch, WebAuthn user handle | no |
+| `api_keys` | public key id, account, name, description, **HMAC-SHA-256 of the key**, scopes, created/expires/revoked/last-used | hash only |
+| `passkeys` | WebAuthn credential id, account, public key, sign counter, name | public keys only |
+| `enrollment_tokens` | SHA-256 of one-time admin enrollment tokens, account, expiry, used time | hash only |
+| `sessions` | SHA-256 of session token, CSRF token, passkey (and through it the account), timestamps | hash only (CSRF token is not a credential on its own) |
+| `devices` | account, push endpoint, `p256dh`, `auth`, name, minimum priority, delivery stats | **yes**: subscription secrets, never returned by any API |
+| `deliveries` | id, account, key id, priority, counts, status — **no title/message** | no |
+| `audit_events` | type, account (none for events before identification), actor, client IP, small JSON detail | no |
+| `settings` | reserved for server-wide settings | no |
+
+A self-hosted installation has the single account `default`. Every data function takes the
+account id first and throws without a valid one, so a query cannot silently cover all accounts;
+see [PLUGINS.md](PLUGINS.md#accounts) for serving several accounts.
 
 ## Important security decisions
 

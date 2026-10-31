@@ -470,7 +470,8 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
 - Delivery is synchronous; nothing is queued across restarts. A request that fails (`502`) should be
   retried by the sender.
 - Rate limits and brute-force blocks are in memory (reset on restart) and assume a single instance.
-- One administrator identity (with multiple passkeys); no per-service routing to specific devices.
+- One administrator identity (with multiple passkeys) per account, and a self-hosted installation
+  uses a single account; no per-service routing to specific devices.
 - `node:sqlite` is marked experimental in Node 24 (warning suppressed).
 - Passkey login in the PWA needs a passkey provider on the device (iCloud Keychain or similar).
 - The admin UI has not been verified on every iOS version; the automated tests exercise the server

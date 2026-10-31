@@ -20,24 +20,24 @@ const noSleep = { RATE_LIMIT_PER_KEY_PER_MINUTE: '100' };
 test('expired subscriptions (404/410) are removed without retry', async () => {
   const t = await app({ env: noSleep, script: () => ({ statusCode: 410 }) });
   const d = addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 502);
   assert.equal(r.json.status, 'failed');
   assert.equal(r.json.devices.removed, 1);
   assert.equal(t.push.calls.length, 1);
-  assert.equal(t.ctx.devices.get(d.id), null);
-  assert.ok(t.ctx.audit.list().some((e) => e.type === 'device.expired'));
+  assert.equal(t.ctx.devices.get('default', d.id), null);
+  assert.ok(t.ctx.audit.list('default', { includeUnattributed: true }).some((e) => e.type === 'device.expired'));
 });
 
 test('transient errors are retried a bounded number of times', async () => {
   const t = await app({ env: noSleep, script: () => ({ statusCode: 503, headers: { 'retry-after': '0' } }) });
   const d = addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.json.status, 'failed');
   assert.equal(t.push.calls.length, 3, 'one attempt plus two retries');
-  const dev = t.ctx.devices.get(d.id);
+  const dev = t.ctx.devices.get('default', d.id);
   assert.equal(dev.failure_count, 1);
   assert.equal(dev.last_status, 503);
 });
@@ -45,7 +45,7 @@ test('transient errors are retried a bounded number of times', async () => {
 test('a transient error followed by success is delivered', async () => {
   const t = await app({ env: noSleep, script: (_s, n) => (n === 1 ? new Error('ECONNRESET') : { statusCode: 201 }) });
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 200);
   assert.equal(r.json.status, 'delivered');
@@ -55,11 +55,11 @@ test('a transient error followed by success is delivered', async () => {
 test('permanent errors are not retried and do not leak endpoint details', async () => {
   const t = await app({ env: noSleep, script: () => ({ statusCode: 403, body: 'BadJwtToken' }) });
   const d = addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(t.push.calls.length, 1);
   assert.equal(r.json.status, 'failed');
-  assert.ok(t.ctx.devices.get(d.id), 'device kept: 403 is a server/VAPID problem, not an expired subscription');
+  assert.ok(t.ctx.devices.get('default', d.id), 'device kept: 403 is a server/VAPID problem, not an expired subscription');
   const all = t.logs.join('\n') + r.text;
   assert.ok(!all.includes(d.subscription.endpoint));
   assert.ok(!all.includes(new URL(d.subscription.endpoint).pathname.slice(1)));
@@ -70,7 +70,7 @@ test('multiple devices are served by one key; partial failures and priority filt
   addDevice(t, { name: 'iphone' });
   addDevice(t, { name: 'android', host: 'fcm.googleapis.com' });
   addDevice(t, { name: 'quiet', minPriority: 'high' });
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key, { title: 'a', message: 'b', priority: 'normal' });
   assert.equal(r.status, 200);
   assert.equal(r.json.status, 'partial');
@@ -78,12 +78,12 @@ test('multiple devices are served by one key; partial failures and priority filt
   const row = t.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(r.json.id);
   assert.equal(row.status, 'partial');
   assert.ok(!JSON.stringify(row).includes('"a"'), 'no content stored');
-  assert.deepEqual(Object.keys(row).sort(), ['created_at', 'delivered', 'failed', 'id', 'key_id', 'priority', 'removed', 'status', 'targeted']);
+  assert.deepEqual(Object.keys(row).sort(), ['account_id', 'created_at', 'delivered', 'failed', 'id', 'key_id', 'priority', 'removed', 'status', 'targeted']);
 });
 
 test('with no devices the request succeeds with status no_devices', async () => {
   const t = await app();
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 200);
   assert.equal(r.json.status, 'no_devices');

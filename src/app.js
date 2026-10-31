@@ -4,6 +4,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createAccounts } from './accounts.js';
 import { createApiKeys } from './apikeys.js';
 import { createAudit } from './audit.js';
 import { ConfigError } from './config.js';
@@ -23,8 +24,10 @@ import { createAdminRoutes } from './admin/routes.js';
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 export const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-// `send` replaces the push transport like a plugin would (used by the tests).
-export function createApp({ config, db, log, send, plugins = [] }) {
+// `send` replaces the push transport like a plugin would (used by the tests). `multiAccount`
+// serves several accounts instead of only the default one (see src/accounts.js).
+export function createApp({ config, db, log, send, plugins = [], multiAccount = false }) {
+  if (typeof multiAccount !== 'boolean') throw new ConfigError('multiAccount must be true or false');
   const ext = resolvePlugins(plugins);
   migratePlugins(db, ext.migrations);
   const services = { rateLimiter: createRateLimiter, failureLimiter: createFailureLimiter, transport: send, ...ext.services };
@@ -39,9 +42,10 @@ export function createApp({ config, db, log, send, plugins = [] }) {
   }
 
   const audit = createAudit(db, log);
+  const accounts = createAccounts(db);
   const keys = createApiKeys(db, config.pepper);
   const devices = createDevices(db);
-  const auth = createAdminAuth({ db, config });
+  const auth = createAdminAuth({ db, config, accounts });
   const pusher = createPusher({ config, db, devices, audit, log, ...(services.transport ? { send: services.transport } : {}) });
   const failureWindow = { windowMs: 10 * 60000, blockMs: config.authBlockMinutes * 60000 };
   const limits = {
@@ -51,13 +55,23 @@ export function createApp({ config, db, log, send, plugins = [] }) {
     adminFailures: services.failureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
     adminAnonymous: services.rateLimiter(config.rateLimitAdminAnonymousPerMinute),
   };
+  const files = loadStatic(PUBLIC_DIR);
+  // Plugin screens: each plugin's web directory is served under /plugins/<name>/, and the web
+  // app imports its entry module (same origin, so the CSP stays unchanged).
+  const web = [];
+  for (const w of ext.web) {
+    const loaded = loadStatic(w.dir);
+    for (const [p, file] of loaded) if (p !== '/' && file) files.set(`/plugins/${w.plugin}${p}`, file);
+    const entry = `/plugins/${w.plugin}/${w.entry}`;
+    if (!files.has(entry)) throw new ConfigError(`plugin "${w.plugin}": web entry "${w.entry}" is not in ${w.dir}`);
+    web.push(entry);
+  }
   const ctx = {
-    config, db, log, audit, keys, devices, auth, pusher, limits,
+    config, db, log, audit, accounts, keys, devices, auth, pusher, limits, multiAccount, web,
     hooks: ext.hooks, features: ext.features, plugins: ext.names, version: VERSION, startedAt: Date.now(),
   };
   const handleNotify = createNotifyHandler(ctx);
   const admin = createAdminRoutes(ctx);
-  const files = loadStatic(PUBLIC_DIR);
   const hsts = config.publicOrigin.startsWith('https:');
 
   // Plugin routes match exact paths and may not hide the web app's files.

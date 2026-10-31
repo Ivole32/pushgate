@@ -4,7 +4,11 @@
 // Storage: HMAC-SHA-256(pepper, full key) as hex. The pepper is a secret file outside the
 //          database. See docs/ARCHITECTURE.md for why a keyed hash is used instead of a
 //          password hash.
+// Every key belongs to one account. Key ids are unique across accounts (lookup on the sending
+// API needs no account); all management functions take the account first and never reach
+// another account's keys.
 import crypto from 'node:crypto';
+import { checkAccountId } from './accounts.js';
 import { transaction } from './db.js';
 
 export const SCOPES = Object.freeze({
@@ -25,6 +29,7 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
 
   const publicView = (row) => ({
     id: row.id,
+    account_id: row.account_id,
     name: row.name,
     description: row.description,
     scopes: JSON.parse(row.scopes),
@@ -38,24 +43,25 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
     status: row.revoked_at ? 'revoked' : row.expires_at !== null && row.expires_at <= now() ? 'expired' : 'active',
   });
 
-  function create({ name, description = '', expiresAt = null, scopes = [SCOPES.SEND], rotatedFrom = null }) {
+  function create(accountId, { name, description = '', expiresAt = null, scopes = [SCOPES.SEND], rotatedFrom = null }) {
+    checkAccountId(accountId);
     for (const s of scopes) if (!ALL_SCOPES.has(s)) throw new Error('unknown scope');
     if (expiresAt !== null && expiresAt <= now()) throw new Error('expiry must be in the future');
     const id = crypto.randomBytes(8).toString('hex');
     const key = `pgk_${id}_${crypto.randomBytes(32).toString('base64url')}`;
-    db.prepare(`INSERT INTO api_keys (id, name, description, key_hash, scopes, created_at, expires_at, rotated_from)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, name, description, hash(key).toString('hex'), JSON.stringify([...new Set(scopes)]), now(), expiresAt, rotatedFrom);
-    return { key, record: get(id) };
+    db.prepare(`INSERT INTO api_keys (id, account_id, name, description, key_hash, scopes, created_at, expires_at, rotated_from)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, accountId, name, description, hash(key).toString('hex'), JSON.stringify([...new Set(scopes)]), now(), expiresAt, rotatedFrom);
+    return { key, record: get(accountId, id) };
   }
 
-  function get(id) {
-    const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id);
+  function get(accountId, id) {
+    const row = db.prepare('SELECT * FROM api_keys WHERE id = ? AND account_id = ?').get(id, checkAccountId(accountId));
     return row ? publicView(row) : null;
   }
 
-  function list() {
-    return db.prepare('SELECT * FROM api_keys ORDER BY created_at DESC').all().map(publicView);
+  function list(accountId) {
+    return db.prepare('SELECT * FROM api_keys WHERE account_id = ? ORDER BY created_at DESC').all(checkAccountId(accountId)).map(publicView);
   }
 
   // Returns { ok: true, key } or { ok: false, reason, keyId }. Callers must not reveal the
@@ -88,23 +94,25 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
     return current;
   }
 
-  function revoke(id) {
-    const res = db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(now(), id);
+  function revoke(accountId, id) {
+    const res = db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at IS NULL')
+      .run(now(), id, checkAccountId(accountId));
     return res.changes === 1;
   }
 
   // Issues a new key with the same name, description and scopes. The old key is revoked
   // immediately, or keeps working for `graceSeconds` so the service can be reconfigured.
-  function rotate(id, { graceSeconds = 0 } = {}) {
+  function rotate(accountId, id, { graceSeconds = 0 } = {}) {
+    checkAccountId(accountId);
     return transaction(db, () => {
-      const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id);
+      const row = db.prepare('SELECT * FROM api_keys WHERE id = ? AND account_id = ?').get(id, accountId);
       if (!row || row.revoked_at) return null;
       const t = now();
       if (row.expires_at !== null && row.expires_at <= t) return null;
       // A key in its rotation grace period already has a successor; rotate that one instead.
       // (Its expires_at is the grace deadline, which must not be copied to a new key.)
       if (db.prepare('SELECT 1 FROM api_keys WHERE rotated_from = ?').get(id)) return null;
-      const created = create({
+      const created = create(accountId, {
         name: row.name,
         description: row.description,
         scopes: JSON.parse(row.scopes),

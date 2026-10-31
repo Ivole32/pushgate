@@ -1,11 +1,15 @@
 // Pushgate admin PWA. No dependencies. All server-provided text is inserted with
-// textContent; nothing is ever parsed as HTML.
+// textContent; nothing is ever parsed as HTML. Plugins listed by the server (same origin) can
+// add sections through the small API passed to their entry module (see docs/PLUGINS.md).
 
 const $ = (id) => document.getElementById(id);
 const DEVICE_KEY = 'pushgate.device_id';
 let csrf = null;
 let oldestEvent = null;
 let vapidKey = null;
+let session = null;
+let pluginsLoaded = false;
+const pluginSections = [];
 
 // ---------- helpers ----------
 
@@ -134,6 +138,13 @@ async function createPasskey(optionsPath, optionsBody) {
   const { challenge_id, options } = await api('POST', optionsPath, optionsBody);
   const cred = await navigator.credentials.create({ publicKey: creationOptions(options) });
   return { challenge_id, response: registrationJSON(cred) };
+}
+
+// Creates the first (or a recovery) passkey of an account with a one-time token and signs in.
+async function enroll(token, name) {
+  const reg = await createPasskey('/admin/api/enroll/options', { token });
+  await api('POST', '/admin/api/enroll/verify', { token, name, ...reg });
+  await boot();
 }
 
 // ---------- push subscription ----------
@@ -341,6 +352,45 @@ async function loadAll() {
   await Promise.all([refreshDeviceState(devices), loadKeys(), loadOverview(), loadPasskeys(), loadEvents()]);
 }
 
+// ---------- plugins ----------
+
+// What plugin entry modules receive. Their sections are cards shown while signed out or in.
+const pluginApi = Object.freeze({
+  api,
+  flash,
+  enroll,
+  reload: () => boot(),
+  session: () => (session ? structuredClone(session) : null),
+  addSection({ view, title, onShow }) {
+    if (view !== 'signed-out' && view !== 'signed-in') throw new Error('view must be "signed-out" or "signed-in"');
+    const el = document.createElement('section');
+    el.className = 'card';
+    el.hidden = true;
+    const h2 = document.createElement('h2');
+    h2.textContent = String(title);
+    el.append(h2);
+    // In the order added: after the core cards of that view and earlier plugin sections.
+    const previous = pluginSections.filter((p) => p.view === view).at(-1)?.el;
+    (previous ?? (view === 'signed-in' ? $('admin') : $('enroll'))).after(el);
+    pluginSections.push({ view, el, onShow });
+    return el;
+  },
+});
+
+async function loadPlugins(entries) {
+  if (pluginsLoaded) return;
+  pluginsLoaded = true;
+  for (const url of entries) {
+    try {
+      const mod = await import(url);
+      if (typeof mod.default === 'function') await mod.default(pluginApi);
+    } catch (err) {
+      console.error('plugin failed to load', url, err);
+      flash('A part of this app could not be loaded.', 'error');
+    }
+  }
+}
+
 // ---------- boot ----------
 
 function show(view) {
@@ -349,6 +399,20 @@ function show(view) {
   $('admin').hidden = view !== 'admin';
   $('logout').hidden = view !== 'admin';
   if (view !== 'admin') $('reauth').hidden = true;
+  const pluginView = view === 'admin' ? 'signed-in' : 'signed-out';
+  for (const s of pluginSections) {
+    s.el.hidden = s.view !== pluginView;
+    if (!s.el.hidden && typeof s.onShow === 'function') guarded(s.onShow)(s.el, pluginApi.session());
+  }
+}
+
+// A link to this app ending in #enroll=pge_... (e.g. from a sign-up email) fills in
+// the token. The fragment never reaches the server; it is removed from the address bar at once.
+function takeEnrollmentLink() {
+  const m = /^#enroll=(pge_[A-Za-z0-9_-]{43})$/.exec(location.hash);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname);
+  $('enroll-form').token.value = m[1];
 }
 
 async function boot() {
@@ -358,6 +422,14 @@ async function boot() {
   $('unsupported-reason').textContent = problem || '';
 
   const s = await api('GET', '/admin/api/session');
+  const multiple = s.accounts === 'multiple';
+  session = { authenticated: s.authenticated, account: s.account ?? null, accounts: s.accounts, features: s.features ?? {} };
+  $('enroll-cli').hidden = multiple;
+  $('enroll-hosted').hidden = !multiple;
+  $('login-hint').textContent = multiple ? 'Sign in with the passkey of your account.' : 'Use the administrator passkey for this server.';
+  $('account-name').hidden = !(multiple && s.account);
+  $('account-name').textContent = s.account ? s.account.name : '';
+  await loadPlugins(s.web ?? []);
   if (s.authenticated) {
     csrf = s.csrf_token;
     show('admin');
@@ -392,12 +464,9 @@ $('reauth-btn').addEventListener('click', guarded(async () => {
 $('enroll-form').addEventListener('submit', guarded(async (event) => {
   event.preventDefault();
   const form = event.target;
-  const token = form.token.value.trim();
-  const reg = await createPasskey('/admin/api/enroll/options', { token });
-  await api('POST', '/admin/api/enroll/verify', { token, name: form.name.value.trim(), ...reg });
+  await enroll(form.token.value.trim(), form.name.value.trim());
   form.reset();
   flash('Passkey created. You are signed in.');
-  await boot();
 }));
 
 $('passkey-form').addEventListener('submit', guarded(async (event) => {
@@ -445,4 +514,6 @@ $('logout').addEventListener('click', guarded(async () => {
   await boot();
 }));
 
+takeEnrollmentLink();
+window.addEventListener('hashchange', takeEnrollmentLink);
 guarded(boot)();

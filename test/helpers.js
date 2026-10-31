@@ -59,14 +59,14 @@ export function fakeSend(script = () => ({ statusCode: 201 })) {
   return { send, calls };
 }
 
-export async function startApp({ env = {}, script, dir = tempDir(), secrets, plugins } = {}) {
+export async function startApp({ env = {}, script, dir = tempDir(), secrets, plugins, multiAccount } = {}) {
   const s = secrets ?? writeSecrets(dir);
   const config = loadConfig(baseEnv(dir, s, env));
   const logs = [];
   const log = createLogger({ level: 'debug', sink: (l) => logs.push(l) });
   const db = openDatabase(config.dataDir);
   const push = fakeSend(script);
-  const app = createApp({ config, db, log, send: push.send, plugins });
+  const app = createApp({ config, db, log, send: push.send, plugins, multiAccount });
   const server = createServer(app);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
@@ -120,10 +120,10 @@ export function request(port, { method = 'GET', path: p = '/', headers = {}, bod
 
 // Creates a passkey row and a session directly in the database (for tests that are not
 // about the WebAuthn ceremony itself). Returns headers for authenticated admin requests.
-export function adminSession(t) {
+export function adminSession(t, accountId = 'default') {
   const id = crypto.randomBytes(16).toString('base64url');
-  t.db.prepare('INSERT INTO passkeys (id, public_key, counter, transports, name, created_at) VALUES (?, ?, 0, ?, ?, ?)')
-    .run(id, Buffer.alloc(77), '[]', 'test', Date.now());
+  t.db.prepare('INSERT INTO passkeys (id, account_id, public_key, counter, transports, name, created_at) VALUES (?, ?, ?, 0, ?, ?, ?)')
+    .run(id, accountId, Buffer.alloc(77), '[]', 'test', Date.now());
   const s = t.ctx.auth.createSession(id);
   return {
     passkeyId: id,
@@ -151,9 +151,9 @@ export function fakeSubscription(host = 'web.push.apple.com') {
   };
 }
 
-export function addDevice(t, { name = 'phone', minPriority = 'low', host } = {}) {
+export function addDevice(t, { name = 'phone', minPriority = 'low', host, accountId = 'default' } = {}) {
   const { subscription } = fakeSubscription(host);
-  const r = t.ctx.devices.upsert({ name, minPriority, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }, 100);
+  const r = t.ctx.devices.upsert(accountId, { name, minPriority, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }, 100);
   return { ...r.device, subscription };
 }
 

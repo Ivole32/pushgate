@@ -3,6 +3,7 @@
 // own database tables; a program that embeds pushgate passes its plugins to `run`/`createApp`.
 // Plugins are trusted code chosen by that program: they are never loaded from configuration,
 // the database or requests. Everything is checked at startup, and any problem aborts it.
+import path from 'node:path';
 import { ConfigError } from './config.js';
 
 export const PLUGIN_API_VERSION = 1;
@@ -12,13 +13,14 @@ export const PLUGIN_API_VERSION = 1;
 const SERVICES = new Set(['rateLimiter', 'failureLimiter', 'transport', 'apiAccess']);
 // Hooks: any number of plugins, called in the order the plugins were given.
 const HOOKS = new Set(['beforeSend', 'afterDelivery']);
-const KEYS = new Set(['name', 'apiVersion', 'services', 'hooks', 'routes', 'features', 'migrations']);
+const KEYS = new Set(['name', 'apiVersion', 'services', 'hooks', 'routes', 'features', 'migrations', 'web']);
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const ROUTE_KEYS = new Set(['method', 'path', 'zone', 'auth', 'crossOrigin', 'handler']);
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const ROUTE_PATH = /^(\/[A-Za-z0-9._~-]+)+$/;
 // Core paths a plugin route can never take over.
-const RESERVED = [/^\/api(\/|$)/, /^\/admin\/api(\/|$)/, /^\/healthz$/];
+const RESERVED = [/^\/api(\/|$)/, /^\/admin\/api(\/|$)/, /^\/plugins(\/|$)/, /^\/healthz$/];
+const WEB_ENTRY = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}\.js$/;
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -57,6 +59,7 @@ export function resolvePlugins(plugins = []) {
     routes: [],
     features: {},
     migrations: [],
+    web: [],
   };
   const owners = {};
   const seenRoutes = new Map();
@@ -101,6 +104,14 @@ export function resolvePlugins(plugins = []) {
       fail(name, 'migrations must be an array of SQL strings');
     }
     if (p.migrations?.length) resolved.migrations.push({ plugin: name, steps: p.migrations });
+
+    if (p.web !== undefined) {
+      const { dir, entry } = isObject(p.web) ? p.web : {};
+      if (Object.keys(p.web ?? {}).some((k) => k !== 'dir' && k !== 'entry')) fail(name, 'web takes only "dir" and "entry"');
+      if (typeof dir !== 'string' || !path.isAbsolute(dir)) fail(name, 'web.dir must be an absolute directory path');
+      if (typeof entry !== 'string' || !WEB_ENTRY.test(entry)) fail(name, 'web.entry must be a .js file name in web.dir');
+      resolved.web.push({ plugin: name, dir, entry });
+    }
   }
   resolved.owners = owners;
   return resolved;

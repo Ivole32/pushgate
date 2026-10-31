@@ -56,23 +56,23 @@ export function createPusher({ config, db, devices, audit, log, send = webpush.s
     }
   }
 
-  // Delivers one notification to all registered devices (or one device for tests).
+  // Delivers one notification to all devices of an account (or one of its devices for tests).
   // Never throws for delivery problems; returns a summary safe to show to the caller.
   // `tagScope` identifies the sending service across key rotations (see apikeys.lineage).
-  async function deliver({ keyId = null, title, message, priority = 'normal', tag = null, tagScope = keyId, ttl = DEFAULT_TTL, service, deviceId = null }) {
+  async function deliver({ accountId, keyId = null, title, message, priority = 'normal', tag = null, tagScope = keyId, ttl = DEFAULT_TTL, service, deviceId = null }) {
     const id = crypto.randomUUID();
     const scoped = tag ? scopedTag(tagScope ?? service, tag) : null;
     const payload = buildPayload({ id, title, message, priority, tag: scoped, service, ts: now() });
     if (Buffer.byteLength(payload) > MAX_PAYLOAD_BYTES) return { error: 'payload_too_large' };
 
-    const all = devices.targets(deviceId);
+    const all = devices.targets(accountId, deviceId);
     const eligible = all.filter((d) => priorityRank(priority) >= priorityRank(d.min_priority));
     const results = await Promise.all(eligible.map(async (d) => {
       const r = await sendOne(d, payload, { ttl, priority, tag: scoped });
       if (r.outcome === 'gone') {
         // Not recorded when the device was removed meanwhile (e.g. it unsubscribed itself and
         // the admin removal sent it an alert).
-        if (devices.remove(d.id)) audit.record('device.expired', { detail: { device: d.id, name: d.name, status: r.status } });
+        if (devices.remove(accountId, d.id)) audit.record('device.expired', { accountId, detail: { device: d.id, name: d.name, status: r.status } });
       } else {
         devices.recordResult(d.id, r.outcome === 'delivered', r.status);
       }
@@ -95,9 +95,9 @@ export function createPusher({ config, db, devices, audit, log, send = webpush.s
     else status = 'failed';
 
     if (config.historyRetentionDays > 0) {
-      db.prepare(`INSERT INTO deliveries (id, key_id, priority, created_at, status, targeted, delivered, failed, removed)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, keyId, priority, now(), status, summary.targeted, summary.delivered, summary.failed, summary.removed);
+      db.prepare(`INSERT INTO deliveries (id, account_id, key_id, priority, created_at, status, targeted, delivered, failed, removed)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, accountId, keyId, priority, now(), status, summary.targeted, summary.delivered, summary.failed, summary.removed);
     }
     return { id, status, devices: summary };
   }

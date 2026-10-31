@@ -1,6 +1,7 @@
 // Process entry point: configuration, HTTP server, periodic maintenance, graceful shutdown.
 // `run` is also the entry point for programs with plugins: `run({ plugins: [...] })` (see docs/PLUGINS.md).
 import http from 'node:http';
+import { DEFAULT_ACCOUNT } from './accounts.js';
 import { createApp, VERSION } from './app.js';
 import { ConfigError, loadConfig } from './config.js';
 import { openDatabase, purgeExpired } from './db.js';
@@ -17,7 +18,7 @@ export function createServer(app) {
   return server;
 }
 
-export function run({ plugins = [] } = {}) {
+export function run({ plugins = [], multiAccount = false } = {}) {
   // The database and its WAL/SHM side files hold subscription secrets: create them private.
   process.umask(0o077);
   let config;
@@ -32,7 +33,7 @@ export function run({ plugins = [] } = {}) {
   const db = openDatabase(config.dataDir);
   let app;
   try {
-    app = createApp({ config, db, log, plugins });
+    app = createApp({ config, db, log, plugins, multiAccount });
   } catch (err) {
     // Plugin problems are reported like configuration errors and abort startup.
     process.stderr.write(`${err instanceof ConfigError ? err.message : 'Failed to start'}\n`);
@@ -62,12 +63,13 @@ export function run({ plugins = [] } = {}) {
       trusted_proxies: config.trustedProxies.map((c) => c.text),
       notifications_enabled: config.notificationsEnabled,
       plugins: app.ctx.plugins,
-      admin_configured: app.ctx.auth.hasAdmin(),
+      multi_account: multiAccount,
+      admin_configured: app.ctx.auth.hasAdmin(DEFAULT_ACCOUNT),
     });
     if (config.adminPublic) {
       log.warn('ADMIN_PUBLIC=true: the web app and admin API accept connections from every address (passkey login still required)');
     }
-    if (!app.ctx.auth.hasAdmin()) {
+    if (!multiAccount && !app.ctx.auth.hasAdmin(DEFAULT_ACCOUNT)) {
       log.warn('no administrator passkey yet: create an enrollment token with "node src/cli.js enroll-token"');
     }
   });

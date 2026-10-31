@@ -1,6 +1,8 @@
 // Push subscriptions ("devices"). Endpoint URLs and keys are secrets: they are only read by
-// the delivery code and never returned by any API.
+// the delivery code and never returned by any API. Every device belongs to one account; all
+// functions take the account first.
 import crypto from 'node:crypto';
+import { checkAccountId } from './accounts.js';
 
 export function hostAllowed(hostname, allowed) {
   const h = hostname.toLowerCase();
@@ -41,50 +43,55 @@ export function createDevices(db, { now = () => Date.now() } = {}) {
     failure_count: row.failure_count,
   });
 
-  function count() {
-    return db.prepare('SELECT COUNT(*) AS n FROM devices').get().n;
+  function count(accountId) {
+    return db.prepare('SELECT COUNT(*) AS n FROM devices WHERE account_id = ?').get(checkAccountId(accountId)).n;
   }
 
-  // Registers a subscription, or refreshes it if the same endpoint is already known.
-  // Returns { device, created } or null when the device limit is reached.
-  function upsert({ name, minPriority = 'low', endpoint, p256dh, auth }, maxDevices) {
-    const existing = db.prepare('SELECT id FROM devices WHERE endpoint = ?').get(endpoint);
+  // Registers a subscription, or refreshes it if the same endpoint is already known in this
+  // account. Returns { device, created }, null when the device limit is reached, or
+  // { conflict: true } when the endpoint belongs to another account (a browser has one
+  // subscription per site; it must be removed there first, it is never moved silently).
+  function upsert(accountId, { name, minPriority = 'low', endpoint, p256dh, auth }, maxDevices) {
+    checkAccountId(accountId);
+    const existing = db.prepare('SELECT id, account_id FROM devices WHERE endpoint = ?').get(endpoint);
+    if (existing && existing.account_id !== accountId) return { conflict: true };
     if (existing) {
       db.prepare('UPDATE devices SET name = ?, min_priority = ?, p256dh = ?, auth = ?, failure_count = 0 WHERE id = ?')
         .run(name, minPriority, p256dh, auth, existing.id);
-      return { device: get(existing.id), created: false };
+      return { device: get(accountId, existing.id), created: false };
     }
-    if (count() >= maxDevices) return null;
+    if (count(accountId) >= maxDevices) return null;
     const id = crypto.randomBytes(16).toString('base64url');
-    db.prepare(`INSERT INTO devices (id, name, endpoint, p256dh, auth, min_priority, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, name, endpoint, p256dh, auth, minPriority, now());
-    return { device: get(id), created: true };
+    db.prepare(`INSERT INTO devices (id, account_id, name, endpoint, p256dh, auth, min_priority, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, accountId, name, endpoint, p256dh, auth, minPriority, now());
+    return { device: get(accountId, id), created: true };
   }
 
-  function get(id) {
-    const row = db.prepare('SELECT * FROM devices WHERE id = ?').get(id);
+  function get(accountId, id) {
+    const row = db.prepare('SELECT * FROM devices WHERE id = ? AND account_id = ?').get(id, checkAccountId(accountId));
     return row ? publicView(row) : null;
   }
 
-  function list() {
-    return db.prepare('SELECT * FROM devices ORDER BY created_at').all().map(publicView);
+  function list(accountId) {
+    return db.prepare('SELECT * FROM devices WHERE account_id = ? ORDER BY created_at').all(checkAccountId(accountId)).map(publicView);
   }
 
-  function update(id, { name, minPriority }) {
-    const res = db.prepare('UPDATE devices SET name = COALESCE(?, name), min_priority = COALESCE(?, min_priority) WHERE id = ?')
-      .run(name ?? null, minPriority ?? null, id);
+  function update(accountId, id, { name, minPriority }) {
+    const res = db.prepare('UPDATE devices SET name = COALESCE(?, name), min_priority = COALESCE(?, min_priority) WHERE id = ? AND account_id = ?')
+      .run(name ?? null, minPriority ?? null, id, checkAccountId(accountId));
     return res.changes === 1;
   }
 
-  function remove(id) {
-    return db.prepare('DELETE FROM devices WHERE id = ?').run(id).changes === 1;
+  function remove(accountId, id) {
+    return db.prepare('DELETE FROM devices WHERE id = ? AND account_id = ?').run(id, checkAccountId(accountId)).changes === 1;
   }
 
   // Internal: full rows including subscription secrets, for delivery only.
-  function targets(deviceId = null) {
+  function targets(accountId, deviceId = null) {
+    checkAccountId(accountId);
     return deviceId
-      ? db.prepare('SELECT * FROM devices WHERE id = ?').all(deviceId)
-      : db.prepare('SELECT * FROM devices ORDER BY created_at').all();
+      ? db.prepare('SELECT * FROM devices WHERE id = ? AND account_id = ?').all(deviceId, accountId)
+      : db.prepare('SELECT * FROM devices WHERE account_id = ? ORDER BY created_at').all(accountId);
   }
 
   function recordResult(id, ok, status) {

@@ -22,10 +22,10 @@ test('requests without an API key are rejected', async () => {
 test('malformed, unknown, revoked and expired keys are rejected identically', async () => {
   const t = await app({ env: { AUTH_FAILURE_LIMIT: '100' } });
   addDevice(t);
-  const { key: good } = t.ctx.keys.create({ name: 'svc' });
-  const { key: revoked, record: rr } = t.ctx.keys.create({ name: 'old' });
-  t.ctx.keys.revoke(rr.id);
-  const { key: expired, record: er } = t.ctx.keys.create({ name: 'exp', expiresAt: Date.now() + 60000 });
+  const { key: good } = t.ctx.keys.create('default', { name: 'svc' });
+  const { key: revoked, record: rr } = t.ctx.keys.create('default', { name: 'old' });
+  t.ctx.keys.revoke('default', rr.id);
+  const { key: expired, record: er } = t.ctx.keys.create('default', { name: 'exp', expiresAt: Date.now() + 60000 });
   t.db.prepare('UPDATE api_keys SET expires_at = ? WHERE id = ?').run(Date.now() - 1, er.id);
   const tampered = good.slice(0, -1) + (good.endsWith('A') ? 'B' : 'A');
   const unknownId = 'pgk_0123456789abcdef_' + good.slice(21);
@@ -48,12 +48,12 @@ test('malformed, unknown, revoked and expired keys are rejected identically', as
 
 test('a valid API key from an untrusted IP is rejected before authentication', async () => {
   const t = await app({ env: { TRUSTED_CIDRS: '10.0.0.0/8' } });
-  const { key, record } = t.ctx.keys.create({ name: 'svc' });
+  const { key, record } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 403);
   assert.equal(r.json.error.code, 'forbidden');
-  assert.equal(t.ctx.keys.get(record.id).last_used_at, null, 'key was never evaluated');
-  assert.ok(t.ctx.audit.list().some((e) => e.type === 'network.rejected' && e.detail.zone === 'api'));
+  assert.equal(t.ctx.keys.get('default', record.id).last_used_at, null, 'key was never evaluated');
+  assert.ok(t.ctx.audit.list('default', { includeUnattributed: true }).some((e) => e.type === 'network.rejected' && e.detail.zone === 'api'));
 });
 
 test('a trusted IP with an invalid API key is rejected', async () => {
@@ -65,7 +65,7 @@ test('a trusted IP with an invalid API key is rejected', async () => {
 test('spoofed forwarding headers do not bypass CIDR restrictions', async () => {
   // No trusted proxy: the header is ignored and the real peer (127.0.0.1) is untrusted.
   const t = await app({ env: { TRUSTED_CIDRS: '10.0.0.0/8', ADMIN_CIDRS: '10.0.0.0/8' } });
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   for (const h of [{ 'X-Forwarded-For': '10.1.2.3' }, { Forwarded: 'for=10.1.2.3' }, { 'X-Real-IP': '10.1.2.3' }]) {
     assert.equal((await notify(t, key, undefined, h)).status, 403);
     assert.equal((await t.request({ path: '/', headers: h })).status, 403);
@@ -74,7 +74,7 @@ test('spoofed forwarding headers do not bypass CIDR restrictions', async () => {
   // Loopback configured as the proxy: only a single, trusted forwarded address passes.
   const p = await app({ env: { TRUSTED_CIDRS: '10.0.0.0/8', ADMIN_CIDRS: '10.0.0.0/8', TRUSTED_PROXIES: '127.0.0.1/32' } });
   addDevice(p);
-  const { key: k2 } = p.ctx.keys.create({ name: 'svc' });
+  const { key: k2 } = p.ctx.keys.create('default', { name: 'svc' });
   assert.equal((await notify(p, k2)).status, 403, 'missing header from proxy');
   assert.equal((await notify(p, k2, undefined, { 'X-Forwarded-For': '192.168.5.5' })).status, 403);
   assert.equal((await notify(p, k2, undefined, { 'X-Forwarded-For': '10.1.2.3, 127.0.0.1' })).status, 403);
@@ -84,7 +84,7 @@ test('spoofed forwarding headers do not bypass CIDR restrictions', async () => {
 
 test('direct access to the backend is refused when a reverse proxy is configured', async () => {
   const t = await app({ env: { TRUSTED_PROXIES: '172.31.250.2/32' } });
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   assert.equal((await notify(t, key)).status, 403);
   assert.equal((await t.request({ path: '/' })).status, 403);
   assert.equal((await t.request({ path: '/healthz' })).status, 200, 'container health check over loopback still works');
@@ -93,7 +93,7 @@ test('direct access to the backend is refused when a reverse proxy is configured
 test('request size and schema limits are enforced', async () => {
   const t = await app();
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc', scopes: [SCOPES.SEND, SCOPES.SEND_HIGH] });
+  const { key } = t.ctx.keys.create('default', { name: 'svc', scopes: [SCOPES.SEND, SCOPES.SEND_HIGH] });
   const auth = { Authorization: `Bearer ${key}` };
   const post = (opts) => t.request({ method: 'POST', path: '/api/v1/notifications', ...opts, headers: { ...auth, ...opts.headers } });
 
@@ -152,7 +152,7 @@ test('request size and schema limits are enforced', async () => {
 test('format characters that real text needs are accepted, hidden tag text is not', async () => {
   const t = await app();
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   // ZWNJ (Persian and Indic spelling) and an emoji subdivision flag (tag characters).
   const flag = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}';
   assert.equal((await notify(t, key, { title: `England ${flag}`, message: 'می\u200Cخواهم' })).status, 200);
@@ -173,7 +173,7 @@ test('format characters that real text needs are accepted, hidden tag text is no
 test('high priority requires the high-priority scope', async () => {
   const t = await app();
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key, { title: 'a', message: 'b', priority: 'high' });
   assert.equal(r.status, 403);
   assert.equal(r.json.error.code, 'insufficient_scope');
@@ -183,8 +183,8 @@ test('high priority requires the high-priority scope', async () => {
 test('rate limits apply per service and globally', async () => {
   const t = await app({ env: { RATE_LIMIT_PER_KEY_PER_MINUTE: '3', RATE_LIMIT_GLOBAL_PER_MINUTE: '5' } });
   addDevice(t);
-  const { key: a } = t.ctx.keys.create({ name: 'a' });
-  const { key: b } = t.ctx.keys.create({ name: 'b' });
+  const { key: a } = t.ctx.keys.create('default', { name: 'a' });
+  const { key: b } = t.ctx.keys.create('default', { name: 'b' });
   for (let i = 0; i < 3; i++) assert.equal((await notify(t, a)).status, 200);
   const limited = await notify(t, a);
   assert.equal(limited.status, 429);
@@ -199,7 +199,7 @@ test('rate limits apply per service and globally', async () => {
 test('repeated authentication failures block further failures, but never a valid key', async () => {
   const t = await app({ env: { AUTH_FAILURE_LIMIT: '3' } });
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   for (let i = 0; i < 3; i++) assert.equal((await notify(t, 'pgk_bad')).status, 401);
   const r = await notify(t, 'pgk_bad');
   assert.equal(r.status, 429, 'further failures are refused');
@@ -207,17 +207,17 @@ test('repeated authentication failures block further failures, but never a valid
   // A neighbour's bad requests (same NAT, /64 or host) must not silence a legitimate sender.
   assert.equal((await notify(t, key)).status, 200, 'a valid key is still served');
   assert.equal((await notify(t, 'pgk_bad')).status, 429, 'the block stays in place');
-  const types = t.ctx.audit.list().map((e) => e.type);
+  const types = t.ctx.audit.list('default', { includeUnattributed: true }).map((e) => e.type);
   assert.ok(types.includes('auth.blocked') && types.includes('auth.valid_key_while_blocked'));
 });
 
 test('revoking a key takes effect immediately and does not affect other keys', async () => {
   const t = await app();
   addDevice(t);
-  const { key: a, record } = t.ctx.keys.create({ name: 'a' });
-  const { key: b } = t.ctx.keys.create({ name: 'b' });
+  const { key: a, record } = t.ctx.keys.create('default', { name: 'a' });
+  const { key: b } = t.ctx.keys.create('default', { name: 'b' });
   assert.equal((await notify(t, a)).status, 200);
-  t.ctx.keys.revoke(record.id);
+  t.ctx.keys.revoke('default', record.id);
   assert.equal((await notify(t, a)).status, 401);
   assert.equal((await notify(t, b)).status, 200);
 });
@@ -225,23 +225,23 @@ test('revoking a key takes effect immediately and does not affect other keys', a
 test('rotation issues a new key; the old key stops working (or after the grace period)', async () => {
   const t = await app();
   addDevice(t);
-  const { key: old, record } = t.ctx.keys.create({ name: 'svc' });
-  const rotated = t.ctx.keys.rotate(record.id);
+  const { key: old, record } = t.ctx.keys.create('default', { name: 'svc' });
+  const rotated = t.ctx.keys.rotate('default', record.id);
   assert.notEqual(rotated.key, old);
   assert.equal(rotated.record.name, 'svc');
   assert.equal(rotated.record.rotated_from, record.id);
   assert.equal((await notify(t, old)).status, 401);
   assert.equal((await notify(t, rotated.key)).status, 200);
 
-  const graced = t.ctx.keys.rotate(rotated.record.id, { graceSeconds: 3600 });
+  const graced = t.ctx.keys.rotate('default', rotated.record.id, { graceSeconds: 3600 });
   assert.equal((await notify(t, rotated.key)).status, 200, 'old key valid during grace');
   assert.equal((await notify(t, graced.key)).status, 200);
-  assert.ok(t.ctx.keys.get(rotated.record.id).expires_at <= Date.now() + 3600000);
+  assert.ok(t.ctx.keys.get('default', rotated.record.id).expires_at <= Date.now() + 3600000);
 });
 
 test('only a hash of each key is stored', async () => {
   const t = await app();
-  const { key, record } = t.ctx.keys.create({ name: 'svc' });
+  const { key, record } = t.ctx.keys.create('default', { name: 'svc' });
   const row = t.db.prepare('SELECT * FROM api_keys WHERE id = ?').get(record.id);
   const secret = key.slice(21);
   assert.ok(!JSON.stringify(row).includes(secret));
@@ -250,24 +250,24 @@ test('only a hash of each key is stored', async () => {
 
 test('sending can be disabled until setup, by configuration and by the pause switch', async () => {
   const t = await app({ env: { REQUIRE_SETUP_BEFORE_SENDING: 'true' } });
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 503);
   assert.equal(t.push.calls.length, 0);
 
   const off = await app({ env: { NOTIFICATIONS_ENABLED: 'false' } });
-  const { key: k2 } = off.ctx.keys.create({ name: 'svc' });
+  const { key: k2 } = off.ctx.keys.create('default', { name: 'svc' });
   assert.equal((await notify(off, k2)).status, 503);
 
   const paused = await app();
-  const { key: k3 } = paused.ctx.keys.create({ name: 'svc' });
-  paused.db.prepare("INSERT INTO settings (key, value) VALUES ('sending_paused', 'true')").run();
+  const { key: k3 } = paused.ctx.keys.create('default', { name: 'svc' });
+  paused.ctx.accounts.setPaused('default', true);
   assert.equal((await notify(paused, k3)).status, 503);
 });
 
 test('unknown API routes and wrong methods are rejected', async () => {
   const t = await app();
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   assert.equal((await t.request({ path: '/api/v1/notifications', headers: { Authorization: `Bearer ${key}` } })).status, 405);
   assert.equal((await t.request({ method: 'POST', path: '/api/v1/keys', headers: { Authorization: `Bearer ${key}` }, body: {} })).status, 404);
 });
@@ -275,7 +275,7 @@ test('unknown API routes and wrong methods are rejected', async () => {
 test('secrets and notification contents never appear in logs, audit events or error responses', async () => {
   const t = await app({ env: { TRUSTED_PROXIES: '127.0.0.1/32', TRUSTED_CIDRS: '10.0.0.0/8', ADMIN_CIDRS: '10.0.0.0/8' } });
   const device = addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const xff = { 'X-Forwarded-For': '10.0.0.7' };
   const responses = [];
   const title = 'Canary-Title-7f3a';
@@ -289,7 +289,7 @@ test('secrets and notification contents never appear in logs, audit events or er
   const haystack = [
     ...t.logs,
     ...responses.map((r) => r.text + JSON.stringify(r.headers)),
-    JSON.stringify(t.ctx.audit.list({ limit: 1000 })),
+    JSON.stringify(t.ctx.audit.list('default', { limit: 1000, includeUnattributed: true })),
   ].join('\n');
   const secret = key.slice(21);
   const forbidden = [
@@ -310,18 +310,18 @@ test('secrets and notification contents never appear in logs, audit events or er
 
 test('a key that was already rotated cannot be rotated again (no early expiry of the new key)', async () => {
   const t = await app();
-  const { record } = t.ctx.keys.create({ name: 'svc' });
-  const first = t.ctx.keys.rotate(record.id, { graceSeconds: 86400 });
-  assert.equal(t.ctx.keys.get(record.id).replaced, true);
-  assert.equal(t.ctx.keys.rotate(record.id, { graceSeconds: 86400 }), null);
+  const { record } = t.ctx.keys.create('default', { name: 'svc' });
+  const first = t.ctx.keys.rotate('default', record.id, { graceSeconds: 86400 });
+  assert.equal(t.ctx.keys.get('default', record.id).replaced, true);
+  assert.equal(t.ctx.keys.rotate('default', record.id, { graceSeconds: 86400 }), null);
   assert.equal(first.record.expires_at, null, 'replacement keeps the original (no) expiry');
-  assert.ok(t.ctx.keys.rotate(first.record.id));
+  assert.ok(t.ctx.keys.rotate('default', first.record.id));
 });
 
 test('a successful request does not reset the failure counter for that client', async () => {
   const t = await app({ env: { AUTH_FAILURE_LIMIT: '3' } });
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   assert.equal((await notify(t, 'pgk_bad')).status, 401);
   assert.equal((await notify(t, 'pgk_bad')).status, 401);
   assert.equal((await notify(t, key)).status, 200);

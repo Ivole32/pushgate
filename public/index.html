@@ -18,6 +18,7 @@
 <body>
   <header>
     <h1>Pushgate</h1>
+    <span id="account-name" class="account" hidden></span>
     <button id="logout" class="link" hidden>Sign out</button>
   </header>
 
@@ -48,14 +49,17 @@
     <!-- Signed out -->
     <section id="login" class="card" hidden>
       <h2>Sign in</h2>
-      <p>Use the administrator passkey for this server.</p>
+      <p id="login-hint">Use the administrator passkey for this server.</p>
       <button id="login-btn">Sign in with passkey</button>
     </section>
 
     <section id="enroll" class="card" hidden>
       <h2>Set up with enrollment token</h2>
-      <p>Create a one-time token on the server host:</p>
-      <pre>docker compose exec pushgate /nodejs/bin/node src/cli.js enroll-token</pre>
+      <div id="enroll-cli">
+        <p>Create a one-time token on the server host:</p>
+        <pre>docker compose exec pushgate /nodejs/bin/node src/cli.js enroll-token</pre>
+      </div>
+      <p id="enroll-hosted" hidden>Paste the one-time token you received to create the passkey for your account.</p>
       <form id="enroll-form">
         <label>Enrollment token <input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" required maxlength="100"></label>
         <label>Passkey name <input name="name" required maxlength="64" value="iPhone"></label>

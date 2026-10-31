@@ -37,13 +37,13 @@ test('administrative endpoints require an authenticated session', async () => {
     assert.equal(r.status, 401, `${method} ${path}`);
   }
   const s = await t.request({ path: '/admin/api/session' });
-  assert.deepEqual(s.json, { authenticated: false, setup_complete: false, features: {} });
+  assert.deepEqual(s.json, { authenticated: false, setup_complete: false, accounts: 'single', features: {}, web: [] });
 });
 
 test('service API keys cannot manage credentials, devices or settings', async () => {
   const t = await app();
-  const { key, record } = t.ctx.keys.create({ name: 'svc' });
-  const { record: other } = t.ctx.keys.create({ name: 'other' });
+  const { key, record } = t.ctx.keys.create('default', { name: 'svc' });
+  const { record: other } = t.ctx.keys.create('default', { name: 'other' });
   const bearer = { Authorization: `Bearer ${key}`, Origin: ORIGIN };
   for (const [method, path, body] of [
     ...ROUTES,
@@ -54,8 +54,8 @@ test('service API keys cannot manage credentials, devices or settings', async ()
     const r = await t.request({ method, path, body, headers: bearer });
     assert.equal(r.status, 401, `${method} ${path}`);
   }
-  assert.equal(t.ctx.keys.get(other.id).status, 'active');
-  assert.equal(t.ctx.keys.list().length, 2);
+  assert.equal(t.ctx.keys.get('default', other.id).status, 'active');
+  assert.equal(t.ctx.keys.list('default').length, 2);
 });
 
 test('state-changing admin requests require Origin and the CSRF token', async () => {
@@ -68,7 +68,7 @@ test('state-changing admin requests require Origin and the CSRF token', async ()
   assert.equal((await post({ ...s.headers, 'Sec-Fetch-Site': 'cross-site' })).status, 403, 'cross-site fetch');
   assert.equal((await post({ Cookie: s.headers.Cookie, Origin: ORIGIN })).status, 403, 'no CSRF token');
   assert.equal((await post({ ...s.headers, 'X-CSRF-Token': 'x'.repeat(43) })).status, 403, 'wrong CSRF token');
-  assert.equal(t.ctx.keys.list().length, 0);
+  assert.equal(t.ctx.keys.list('default').length, 0);
   const ok = await post(s.headers);
   assert.equal(ok.status, 201);
   assert.match(ok.json.key, /^pgk_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$/);
@@ -100,7 +100,7 @@ test('admin key management: create (shown once), list without secrets, rotate, r
 
   const past = await t.request({ method: 'POST', path: '/admin/api/keys', headers: s.headers, body: { name: 'x', expires_at: Date.now() - 1000 } });
   assert.equal(past.status, 400);
-  const events = t.ctx.audit.list().map((e) => e.type);
+  const events = t.ctx.audit.list('default', { includeUnattributed: true }).map((e) => e.type);
   for (const e of ['api_key.created', 'api_key.rotated', 'api_key.revoked']) assert.ok(events.includes(e));
 });
 
@@ -156,13 +156,13 @@ test('an admin can register, update, test and remove devices; secrets are never 
   assert.equal(tp.json.status, 'delivered');
   assert.equal(t.push.calls.filter((c) => JSON.parse(c.payload).title === 'Pushgate test').length, 1);
   assert.equal((await t.request({ method: 'DELETE', path: `/admin/api/devices/${id}`, headers: s.headers })).status, 200);
-  assert.equal(t.ctx.devices.get(id), null);
+  assert.equal(t.ctx.devices.get('default', id), null);
 });
 
 test('settings, overview and security events are available to the admin without secrets', async () => {
   const t = await app();
   const s = adminSession(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   await notify(t, key + 'bad');
   const put = await t.request({ method: 'PUT', path: '/admin/api/settings', headers: s.headers, body: { sending_paused: true } });
   assert.equal(put.status, 200);
@@ -200,7 +200,7 @@ test('passkey enrollment requires a one-time token; login works with the enrolle
   assert.equal((await post('/admin/api/enroll/options', {}, {})).status, 400);
   assert.equal((await post('/admin/api/enroll/options', { token: 'x' }, { Origin: 'https://evil.example' })).status, 403);
 
-  const { token } = t.ctx.auth.createEnrollmentToken();
+  const { token } = t.ctx.auth.createEnrollmentToken('default');
   const opts = await post('/admin/api/enroll/options', { token });
   assert.equal(opts.status, 200);
   assert.equal(opts.json.options.rp.id, 'pushgate.test');
@@ -209,14 +209,14 @@ test('passkey enrollment requires a one-time token; login works with the enrolle
   // A response for the wrong origin fails and burns the challenge.
   const wrong = await post('/admin/api/enroll/verify', { token, name: 'phone', challenge_id: opts.json.challenge_id, response: authn.register(opts.json.options, { clientOrigin: 'https://evil.example' }) });
   assert.equal(wrong.status, 401);
-  assert.equal(t.ctx.auth.hasAdmin(), false);
+  assert.equal(t.ctx.auth.hasAdmin('default'), false);
 
   const opts2 = await post('/admin/api/enroll/options', { token });
   const enrolled = await post('/admin/api/enroll/verify', { token, name: 'phone', challenge_id: opts2.json.challenge_id, response: authn.register(opts2.json.options) });
   assert.equal(enrolled.status, 200);
   const cookie = enrolled.headers['set-cookie'][0];
   assert.match(cookie, /^__Host-pushgate_session=[A-Za-z0-9_-]{43}; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=\d+$/);
-  assert.equal(t.ctx.auth.hasAdmin(), true);
+  assert.equal(t.ctx.auth.hasAdmin('default'), true);
 
   // The token is single use.
   assert.equal((await post('/admin/api/enroll/options', { token })).status, 401);
@@ -283,7 +283,7 @@ test('a distributed challenge flood cannot block or lock out the administrator',
   const authn = createSoftAuthenticator({ origin: ORIGIN, rpId: 'pushgate.test' });
   const admin = { Origin: ORIGIN, 'X-Forwarded-For': '203.0.113.9' };
   const post = (path, body, headers = admin) => t.request({ method: 'POST', path, body, headers });
-  const { token } = t.ctx.auth.createEnrollmentToken();
+  const { token } = t.ctx.auth.createEnrollmentToken('default');
   const opts = await post('/admin/api/enroll/options', { token });
   assert.equal((await post('/admin/api/enroll/verify', { token, name: 'p', challenge_id: opts.json.challenge_id, response: authn.register(opts.json.options) })).status, 200);
 
@@ -299,7 +299,7 @@ test('a distributed challenge flood cannot block or lock out the administrator',
   const [payload] = pending.json.challenge_id.split('.');
   const forged = `${payload}.${'A'.repeat(43)}`;
   // A fresh, validly signed enrollment challenge offered for login: rejected because kinds are bound.
-  const crossKind = (await post('/admin/api/enroll/options', { token: t.ctx.auth.createEnrollmentToken().token })).json.challenge_id;
+  const crossKind = (await post('/admin/api/enroll/options', { token: t.ctx.auth.createEnrollmentToken('default').token })).json.challenge_id;
   for (const challenge_id of [forged, crossKind, forged, forged]) {
     const r = await post('/admin/api/login/verify', { challenge_id, response: authn.login(pending.json.options) });
     assert.equal(r.status, 400);
@@ -322,7 +322,7 @@ test('unauthenticated admin endpoints are rate limited per client inside the app
 
 test('ADMIN_PUBLIC opens only the web app and admin API; sending stays restricted', async () => {
   const t = await app({ env: { ADMIN_PUBLIC: 'true', ADMIN_CIDRS: '', TRUSTED_PROXIES: '127.0.0.1/32', TRUSTED_CIDRS: '10.0.0.0/8' } });
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const internet = { 'X-Forwarded-For': '203.0.113.9' };
   assert.equal((await t.request({ path: '/', headers: internet })).status, 200);
   assert.equal((await t.request({ path: '/admin/api/session', headers: internet })).status, 200);
@@ -340,7 +340,7 @@ test('login challenges do not survive a server restart', async () => {
   const first = await startApp({ dir }); // closed below, not by the shared teardown
   const authn = createSoftAuthenticator({ origin: ORIGIN, rpId: 'pushgate.test' });
   const post = (t, path, body) => t.request({ method: 'POST', path, body, headers: { Origin: ORIGIN } });
-  const { token } = first.ctx.auth.createEnrollmentToken();
+  const { token } = first.ctx.auth.createEnrollmentToken('default');
   const eo = await post(first, '/admin/api/enroll/options', { token });
   await post(first, '/admin/api/enroll/verify', { token, name: 'p', challenge_id: eo.json.challenge_id, response: authn.register(eo.json.options) });
   const lo = await post(first, '/admin/api/login/options', {});

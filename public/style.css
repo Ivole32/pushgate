@@ -137,3 +137,10 @@ button.link { background: none; border: none; color: var(--accent); padding: 4px
 .flash[data-kind=error] { background: var(--danger); }
 
 [hidden] { display: none !important; }
+
+header .account {
+  margin-left: auto;
+  margin-right: 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}

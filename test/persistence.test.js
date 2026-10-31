@@ -8,16 +8,16 @@ test('keys, devices, revocations and settings survive a restart', async () => {
   const dir = tempDir();
   const first = await startApp({ dir });
   addDevice(first);
-  const { key } = first.ctx.keys.create({ name: 'svc' });
-  const { key: revokedKey, record } = first.ctx.keys.create({ name: 'gone' });
-  first.ctx.keys.revoke(record.id);
+  const { key } = first.ctx.keys.create('default', { name: 'svc' });
+  const { key: revokedKey, record } = first.ctx.keys.create('default', { name: 'gone' });
+  first.ctx.keys.revoke('default', record.id);
   assert.equal((await notify(first, key)).status, 200);
   await first.close();
 
   const second = await startApp({ dir, secrets: first.secrets });
   assert.equal((await notify(second, key)).status, 200);
   assert.equal((await notify(second, revokedKey)).status, 401);
-  assert.equal(second.ctx.devices.list().length, 1);
+  assert.equal(second.ctx.devices.list('default').length, 1);
   assert.equal(second.push.calls.length, 1);
   await second.close();
 });
@@ -25,7 +25,7 @@ test('keys, devices, revocations and settings survive a restart', async () => {
 test('a different pepper invalidates every stored key (pepper is required to verify)', async () => {
   const dir = tempDir();
   const first = await startApp({ dir });
-  const { key } = first.ctx.keys.create({ name: 'svc' });
+  const { key } = first.ctx.keys.create('default', { name: 'svc' });
   await first.close();
   const other = await startApp({ dir: dir }); // writes fresh secrets into the same dir
   assert.equal((await notify(other, key)).status, 401);
@@ -34,7 +34,7 @@ test('a different pepper invalidates every stored key (pepper is required to ver
 
 test('online backup produces a usable copy; retention purges old metadata', async () => {
   const t = await startApp();
-  const { record } = t.ctx.keys.create({ name: 'svc' });
+  const { record } = t.ctx.keys.create('default', { name: 'svc' });
   t.db.prepare("INSERT INTO deliveries (id, key_id, priority, created_at, status, targeted, delivered, failed, removed) VALUES ('old', NULL, 'low', 0, 'delivered', 1, 1, 0, 0)").run();
   t.db.prepare("INSERT INTO audit_events (ts, type, actor) VALUES (0, 'ancient', 'x')").run();
   purgeExpired(t.db, t.config);

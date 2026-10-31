@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-const MIGRATIONS = [
+export const MIGRATIONS = [
   `
   CREATE TABLE api_keys (
     id            TEXT PRIMARY KEY,
@@ -83,6 +83,38 @@ const MIGRATIONS = [
   // Sensitive changes require this to be recent. Existing sessions count as not verified.
   `
   ALTER TABLE sessions ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0;
+  `,
+  // Accounts. Everything that existed before belongs to the account "default", which also takes
+  // over the former global pause switch and WebAuthn user handle. New rows always name their
+  // account explicitly; the column defaults only fill existing rows. (SQLite cannot add a
+  // foreign key column with a non-NULL default, so account removal deletes rows in code.)
+  `
+  CREATE TABLE accounts (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    webauthn_user_id  TEXT,
+    sending_paused    INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL
+  );
+  INSERT INTO accounts (id, name, webauthn_user_id, sending_paused, created_at) VALUES (
+    'default', 'default',
+    (SELECT value FROM settings WHERE key = 'webauthn_user_id'),
+    COALESCE((SELECT value = 'true' FROM settings WHERE key = 'sending_paused'), 0),
+    CAST(strftime('%s', 'now') AS INTEGER) * 1000
+  );
+  DELETE FROM settings WHERE key IN ('webauthn_user_id', 'sending_paused');
+  ALTER TABLE api_keys ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default';
+  ALTER TABLE passkeys ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default';
+  ALTER TABLE enrollment_tokens ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default';
+  ALTER TABLE devices ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default';
+  ALTER TABLE deliveries ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default';
+  ALTER TABLE audit_events ADD COLUMN account_id TEXT;
+  UPDATE audit_events SET account_id = 'default';
+  CREATE INDEX api_keys_account ON api_keys(account_id);
+  CREATE INDEX passkeys_account ON passkeys(account_id);
+  CREATE INDEX devices_account ON devices(account_id);
+  CREATE INDEX deliveries_account ON deliveries(account_id, created_at);
+  CREATE INDEX audit_events_account ON audit_events(account_id, id);
   `,
 ];
 

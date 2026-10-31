@@ -3,6 +3,7 @@
 export { run, createServer } from './server.js';
 export { createApp, VERSION } from './app.js';
 export { PLUGIN_API_VERSION, resolvePlugins } from './plugins.js';
+export { DEFAULT_ACCOUNT } from './accounts.js';
 export { ConfigError, loadConfig } from './config.js';
 export { openDatabase, transaction } from './db.js';
 export { HttpError, errors, readJson, sendJson } from './http.js';

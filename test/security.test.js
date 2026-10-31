@@ -22,7 +22,7 @@ const post = (t, p, body, headers = {}) => t.request({ method: 'POST', path: p, 
 
 // Enrolls a passkey through the real ceremony; returns headers for the new session.
 async function enroll(t, authn, name = 'phone') {
-  const { token } = t.ctx.auth.createEnrollmentToken();
+  const { token } = t.ctx.auth.createEnrollmentToken('default');
   const opts = await post(t, '/admin/api/enroll/options', { token });
   const r = await post(t, '/admin/api/enroll/verify', { token, name, challenge_id: opts.json.challenge_id, response: authn.register(opts.json.options) });
   assert.equal(r.status, 200);
@@ -55,7 +55,7 @@ test('sensitive changes need a recent passkey confirmation, not just a session c
     assert.equal(r.status, 403, `${method} ${p}`);
     assert.equal(r.json.error.code, 'reauth_required');
   }
-  assert.equal(t.ctx.keys.list().length, 0);
+  assert.equal(t.ctx.keys.list('default').length, 0);
   // Reading and protective actions do not need it.
   assert.equal((await t.request({ path: '/admin/api/keys', headers: h })).status, 200);
   assert.equal((await t.request({ method: 'PUT', path: '/admin/api/settings', headers: h, body: { sending_paused: false } })).status, 200);
@@ -71,7 +71,7 @@ test('sensitive changes need a recent passkey confirmation, not just a session c
   const rv = await post(t, '/admin/api/reauth/verify', { challenge_id: ro.json.challenge_id, response: authn.login(ro.json.options) }, h);
   assert.equal(rv.status, 200);
   assert.equal((await t.request({ method: 'POST', path: '/admin/api/keys', headers: h, body: { name: 'x' } })).status, 201);
-  assert.ok(t.ctx.audit.list().some((e) => e.type === 'admin.reverified'));
+  assert.ok(t.ctx.audit.list('default', { includeUnattributed: true }).some((e) => e.type === 'admin.reverified'));
 });
 
 test('security-relevant changes are pushed to every device, including the one being removed', async () => {
@@ -108,7 +108,7 @@ test('removing a device that already unsubscribed is not recorded as expired', a
   const phone = addDevice(t);
   assert.equal((await t.request({ method: 'DELETE', path: `/admin/api/devices/${phone.id}`, headers: h })).status, 200);
   await new Promise((r) => setTimeout(r, 50));
-  const types = t.ctx.audit.list().map((e) => e.type);
+  const types = t.ctx.audit.list('default', { includeUnattributed: true }).map((e) => e.type);
   assert.ok(types.includes('device.removed'));
   assert.ok(!types.includes('device.expired'));
 });
@@ -127,7 +127,7 @@ test('a refused recovery enrollment neither spends the token nor signs anyone ou
   const authn = soft();
   const h = await enroll(t, authn);
   // The same authenticator again: its credential id is already registered.
-  const { token } = t.ctx.auth.createEnrollmentToken();
+  const { token } = t.ctx.auth.createEnrollmentToken('default');
   const opts = await post(t, '/admin/api/enroll/options', { token });
   const r = await post(t, '/admin/api/enroll/verify', { token, name: 'again', challenge_id: opts.json.challenge_id, response: authn.register(opts.json.options) });
   assert.equal(r.status, 401);
@@ -141,7 +141,7 @@ test('passkeys with unaddressable ids or invalid transports cannot be planted', 
   // An 800-character id could never be removed through the API.
   const long = await addPasskey(t, h, soft({ idLength: 600 }));
   assert.equal(long.status, 400);
-  assert.equal(t.ctx.auth.listPasskeys().length, 1);
+  assert.equal(t.ctx.auth.listPasskeys('default').length, 1);
 
   // Junk transports would make navigator.credentials.create() throw in every browser later.
   const junk = soft();
@@ -159,16 +159,16 @@ test('the CLI can remove any passkey, the web app never the last one', async () 
   const t = await app();
   const authn = soft();
   await enroll(t, authn);
-  assert.equal(t.ctx.auth.removePasskey(authn.id), 'last');
-  assert.equal(t.ctx.auth.removePasskey(authn.id, { allowLast: true }), 'ok');
-  assert.equal(t.ctx.auth.hasAdmin(), false);
+  assert.equal(t.ctx.auth.removePasskey('default', authn.id), 'last');
+  assert.equal(t.ctx.auth.removePasskey('default', authn.id, { allowLast: true }), 'ok');
+  assert.equal(t.ctx.auth.hasAdmin('default'), false);
 });
 
 test('a tag only replaces notifications of the same service, and is not sent in clear', async () => {
   const t = await app();
   addDevice(t);
-  const a = t.ctx.keys.create({ name: 'alertmanager' });
-  const b = t.ctx.keys.create({ name: 'printer' });
+  const a = t.ctx.keys.create('default', { name: 'alertmanager' });
+  const b = t.ctx.keys.create('default', { name: 'printer' });
   const topicOf = async (key, tag) => {
     assert.equal((await notify(t, key, { title: 'x', message: 'y', tag })).status, 200);
     return t.push.calls.at(-1).options.topic;
@@ -179,9 +179,9 @@ test('a tag only replaces notifications of the same service, and is not sent in 
   assert.ok(!real.includes('db-down'));
   assert.notEqual(await topicOf(a.key, 'disk'), real);
   // The service keeps its tags across key rotations.
-  const rotated = t.ctx.keys.rotate(a.record.id);
+  const rotated = t.ctx.keys.rotate('default', a.record.id);
   assert.equal(await topicOf(rotated.key, 'db-down'), real);
-  assert.equal(await topicOf(t.ctx.keys.rotate(rotated.record.id).key, 'db-down'), real);
+  assert.equal(await topicOf(t.ctx.keys.rotate('default', rotated.record.id).key, 'db-down'), real);
 });
 
 test('rotating client addresses cannot grow the security event table without bound', async () => {
@@ -203,10 +203,10 @@ test('suppressed security events are summarised once the flood subsides', () => 
   let now = 1e12;
   const audit = createAudit(db, createLogger({ sink: () => {} }), { now: () => now });
   for (let i = 0; i < 200; i++) audit.recordThrottled('network.rejected', { ip: `203.0.113.${i}` });
-  assert.equal(audit.list().length, 60);
+  assert.equal(audit.list('default', { includeUnattributed: true }).length, 60);
   now += 60000;
   audit.recordThrottled('network.rejected', { ip: '192.0.2.1' });
-  const [latest, summary] = audit.list();
+  const [latest, summary] = audit.list('default', { includeUnattributed: true });
   assert.equal(latest.ip, '192.0.2.1');
   assert.deepEqual([summary.type, summary.detail], ['audit.suppressed', { count: 140 }]);
   db.close();

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { after, test } from 'node:test';
 import { createApp } from '../src/app.js';
 import { ConfigError, loadConfig } from '../src/config.js';
@@ -81,7 +83,7 @@ test('beforeSend hooks can refuse a notification; nothing is sent and content st
     ],
   });
   addDevice(t);
-  const { key, record } = t.ctx.keys.create({ name: 'svc' });
+  const { key, record } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key, { title: 'secret title', message: 'secret body', priority: 'low' });
   assert.equal(r.status, 429);
   assert.equal(r.json.error.code, 'quota_exceeded');
@@ -100,7 +102,7 @@ test('beforeSend hooks can refuse a notification; nothing is sent and content st
 test('a beforeSend hook that crashes blocks the notification with a 500', async () => {
   const t = await app({ plugins: [plugin({ hooks: { beforeSend: async () => { throw new Error('quota database down'); } } })] });
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 500);
   assert.equal(r.json.error.code, 'internal_error');
@@ -116,7 +118,7 @@ test('afterDelivery hooks see the outcome; a failing one is logged and does not 
     ],
   });
   addDevice(t);
-  const { key, record } = t.ctx.keys.create({ name: 'svc' });
+  const { key, record } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 200);
   assert.deepEqual(metered, [[record.id, 1]]);
@@ -142,14 +144,14 @@ test('services can be replaced: rate limiters and the push transport', async () 
   });
   assert.deepEqual(limits, [30, 120, 30], 'per key, global and anonymous admin limits are built with the plugin');
   addDevice(t);
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);
   assert.equal(r.status, 429, 'the replaced global limiter refuses');
   assert.equal(r.headers['retry-after'], '7');
 
   const t2 = await app({ plugins: [plugin({ services: { transport: async (s) => { pushed.push(s.endpoint); return { statusCode: 201 }; } } })] });
   const device = addDevice(t2);
-  const { key: key2 } = t2.ctx.keys.create({ name: 'svc' });
+  const { key: key2 } = t2.ctx.keys.create('default', { name: 'svc' });
   assert.equal((await notify(t2, key2)).status, 200);
   assert.deepEqual(pushed, [device.subscription.endpoint]);
   assert.equal(t2.push.calls.length, 0, 'the built-in transport was not used');
@@ -161,7 +163,7 @@ test('a plugin can replace the sending API network check, only an explicit true 
     env,
     plugins: [plugin({ services: { apiAccess: (client, { fallback }) => (client.ip === '203.0.113.9' ? true : client.ip === '198.51.100.7' ? 'yes' : fallback(client)) } })],
   });
-  const { key } = t.ctx.keys.create({ name: 'svc' });
+  const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const from = (ip) => notify(t, key, undefined, { 'X-Forwarded-For': ip });
   assert.equal((await from('203.0.113.9')).status, 200);
   assert.equal((await from('10.1.2.3')).status, 200, 'the default check is available as fallback');
@@ -224,4 +226,41 @@ test('plugin migrations run once, in order, and new steps are applied on the nex
   assert.deepEqual({ ...t2.db.prepare('SELECT account, sent, plan FROM test_usage').get() }, { account: 'a', sent: 5, plan: null });
   assert.deepEqual(t2.db.prepare('SELECT plugin, version FROM plugin_migrations ORDER BY version').all().map((r) => ({ ...r })),
     [{ plugin: 'test', version: 1 }, { plugin: 'test', version: 2 }]);
+});
+
+test('hooks receive the sending key\'s account', async () => {
+  const seen = [];
+  const t = await app({ multiAccount: true, plugins: [plugin({ hooks: { beforeSend: ({ account }) => seen.push(account) } })] });
+  const bob = t.ctx.accounts.create({ name: 'bob' });
+  const { key } = t.ctx.keys.create(bob.id, { name: 'svc' });
+  assert.equal((await notify(t, key)).status, 200);
+  assert.deepEqual(seen.map((a) => [a.id, a.name]), [[bob.id, 'bob']]);
+});
+
+test('plugin web files are served under /plugins/<name>/ and listed for the web app', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'main.js'), 'export default (pushgate) => pushgate.addSection({ view: "signed-out", title: "Sign up" });\n');
+  fs.writeFileSync(path.join(dir, 'style.css'), '.x { color: red; }\n');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not served');
+  const t = await app({ plugins: [plugin({ web: { dir, entry: 'main.js' } })] });
+  const js = await t.request({ path: '/plugins/test/main.js' });
+  assert.equal(js.status, 200);
+  assert.match(js.headers['content-type'], /^text\/javascript/);
+  assert.match(js.headers['content-security-policy'], /script-src 'self'/);
+  assert.equal((await t.request({ path: '/plugins/test/style.css' })).status, 200);
+  assert.equal((await t.request({ path: '/plugins/test/notes.txt' })).status, 404, 'only known file types');
+  assert.equal((await t.request({ path: '/plugins/test/../../package.json' })).status, 400);
+  assert.deepEqual((await t.request({ path: '/admin/api/session' })).json.web, ['/plugins/test/main.js']);
+
+  assert.throws(() => resolvePlugins([plugin({ web: { dir: 'relative', entry: 'main.js' } })]), /absolute directory/);
+  assert.throws(() => resolvePlugins([plugin({ web: { dir, entry: '../main.js' } })]), /web.entry/);
+  assert.throws(() => resolvePlugins([plugin({ web: { dir, entry: 'main.js', extra: 1 } })]), /only "dir" and "entry"/);
+  assert.throws(() => resolvePlugins([plugin({ routes: [route({ path: '/plugins/test/x' })] })]), /reserved/);
+  const config = loadConfig(baseEnv(dir, writeSecrets(dir)));
+  const db = openDatabase(config.dataDir);
+  try {
+    assert.throws(() => createApp({ config, db, log: createLogger({ sink: noop }), plugins: [plugin({ web: { dir, entry: 'missing.js' } })] }), /is not in/);
+  } finally {
+    db.close();
+  }
 });

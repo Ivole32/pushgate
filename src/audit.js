@@ -1,4 +1,7 @@
 // Minimal security audit trail. Details must never contain secrets or notification content.
+// Events belong to an account, or to none when they happen before anyone is identified
+// (rejected networks, unknown keys, failed sign-ins); those are shown only in single-account mode.
+import { checkAccountId } from './accounts.js';
 import { clientKey } from './netacl.js';
 import { createRateLimiter } from './ratelimit.js';
 
@@ -8,7 +11,7 @@ const MAX_TRACKED = 10000;
 const ANONYMOUS_ROWS_PER_MINUTE = 60;
 
 export function createAudit(db, log, { now = () => Date.now() } = {}) {
-  const insert = db.prepare('INSERT INTO audit_events (ts, type, actor, ip, detail) VALUES (?, ?, ?, ?, ?)');
+  const insert = db.prepare('INSERT INTO audit_events (ts, type, account_id, actor, ip, detail) VALUES (?, ?, ?, ?, ?, ?)');
   // Rejections can be triggered by anyone on the network, so persisting them is throttled
   // per (type, client) and in total, to keep a flood from growing the database. Every
   // rejection is still logged, and the number of unpersisted ones is recorded once the flood
@@ -17,17 +20,17 @@ export function createAudit(db, log, { now = () => Date.now() } = {}) {
   const budget = createRateLimiter(ANONYMOUS_ROWS_PER_MINUTE, { now });
   let suppressed = 0;
 
-  function record(type, { actor = 'system', ip = null, detail = {} } = {}) {
-    insert.run(now(), type, actor, ip, JSON.stringify(detail));
-    log.info('audit', { event: type, actor, ip, ...detail });
+  function record(type, { accountId = null, actor = 'system', ip = null, detail = {} } = {}) {
+    insert.run(now(), type, accountId, actor, ip, JSON.stringify(detail));
+    log.info('audit', { event: type, account: accountId, actor, ip, ...detail });
   }
 
-  function recordThrottled(type, { actor = 'anonymous', ip = null, detail = {} } = {}) {
+  function recordThrottled(type, { accountId = null, actor = 'anonymous', ip = null, detail = {} } = {}) {
     const key = `${type}|${ip === null ? '' : clientKey(ip)}`;
     const t = now();
     if ((lastWrite.get(key) ?? 0) > t - 60000 || budget.take('all')) {
       suppressed += 1;
-      log.info('audit', { event: type, actor, ip, persisted: false, ...detail });
+      log.info('audit', { event: type, account: accountId, actor, ip, persisted: false, ...detail });
       return;
     }
     // Bounded, oldest first (re-inserting moves a key to the end of the Map's order).
@@ -44,13 +47,16 @@ export function createAudit(db, log, { now = () => Date.now() } = {}) {
       record('audit.suppressed', { detail: { count: suppressed } });
       suppressed = 0;
     }
-    record(type, { actor, ip, detail });
+    record(type, { accountId, actor, ip, detail });
   }
 
-  function list({ limit = 100, before = null } = {}) {
+  // Events of one account, plus the unattributed ones if `includeUnattributed`.
+  function list(accountId, { limit = 100, before = null, includeUnattributed = false } = {}) {
+    checkAccountId(accountId);
+    const scope = includeUnattributed ? '(account_id = ? OR account_id IS NULL)' : 'account_id = ?';
     const rows = before
-      ? db.prepare('SELECT * FROM audit_events WHERE id < ? ORDER BY id DESC LIMIT ?').all(before, limit)
-      : db.prepare('SELECT * FROM audit_events ORDER BY id DESC LIMIT ?').all(limit);
+      ? db.prepare(`SELECT * FROM audit_events WHERE ${scope} AND id < ? ORDER BY id DESC LIMIT ?`).all(accountId, before, limit)
+      : db.prepare(`SELECT * FROM audit_events WHERE ${scope} ORDER BY id DESC LIMIT ?`).all(accountId, limit);
     return rows.map((r) => ({ id: r.id, ts: r.ts, type: r.type, actor: r.actor, ip: r.ip, detail: JSON.parse(r.detail) }));
   }
 
