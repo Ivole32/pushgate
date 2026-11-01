@@ -165,9 +165,10 @@ async function enroll(token, name, { confirmAccount = false } = {}) {
 const hasPushApi = () => 'PushManager' in window
   || ('ServiceWorkerRegistration' in window && 'pushManager' in ServiceWorkerRegistration.prototype);
 
+// Every message ends with what the browser reports, so a problem can be reported precisely.
 function pushSupport() {
-  if (!window.isSecureContext) return 'This page is not served over HTTPS.';
-  if (isIOS() && !isStandalone() && !hasPushApi()) return 'Open Pushgate from the Home Screen icon to enable notifications.';
+  if (!window.isSecureContext) return `This page is not served over HTTPS. (${pushDetails()})`;
+  if (isIOS() && !isStandalone() && !hasPushApi()) return `Open Pushgate from the Home Screen icon to enable notifications. (${pushDetails()})`;
   if ('serviceWorker' in navigator && hasPushApi()) return null;
   if (!isIOS()) return `This browser does not support Web Push. (${pushDetails()})`;
   return 'iOS does not offer push notifications to this Home Screen app. They need iOS 16.4 or later, and iOS '
@@ -182,6 +183,7 @@ function pushDetails() {
   const yes = (v) => (v ? 'yes' : 'no');
   return [
     ios ? `iOS ${ios[1]}.${ios[2]}` : null,
+    `secure connection: ${yes(window.isSecureContext)}`,
     `Home Screen app: ${yes(isStandalone())}`,
     `service worker: ${yes('serviceWorker' in navigator)}`,
     `Push API: ${yes(hasPushApi())}`,
@@ -199,17 +201,8 @@ async function notificationPermission(reg) {
   return state === 'prompt' ? 'default' : state;
 }
 
-// The CSP requires Trusted Types for script URLs; this policy only ever produces the service
-// worker's URL.
-const scriptPolicy = window.trustedTypes?.createPolicy('pushgate', {
-  createScriptURL: (url) => {
-    if (url !== '/sw.js') throw new TypeError('unexpected script URL');
-    return url;
-  },
-});
-
 async function registration() {
-  return navigator.serviceWorker.register(scriptPolicy ? scriptPolicy.createScriptURL('/sw.js') : '/sw.js', { scope: '/' });
+  return navigator.serviceWorker.register('/sw.js', { scope: '/' });
 }
 
 async function refreshDeviceState(devices) {
@@ -217,19 +210,25 @@ async function refreshDeviceState(devices) {
   const known = devices.some((d) => d.id === localStorage.getItem(DEVICE_KEY));
   let sub = null;
   let permission = 'default';
+  let failure = null;
   if (!problem) {
-    const reg = await registration();
-    sub = await reg.pushManager.getSubscription();
-    permission = await notificationPermission(reg);
+    // A service worker that cannot start is shown here instead of leaving "Checking…"; the
+    // form stays, so a tap retries and reports the error again.
+    try {
+      const reg = await registration();
+      sub = await reg.pushManager.getSubscription();
+      permission = await notificationPermission(reg);
+    } catch (err) {
+      const reason = String(err.message || err).replace(/\.$/, '');
+      failure = `The notification service worker could not be started: ${reason}. (${pushDetails()})`;
+    }
   }
   const active = Boolean(sub && known);
-  $('device-state').textContent = problem
-    ? problem
-    : active
-      ? `Notifications are enabled on this device (permission: ${permission}).`
-      : permission === 'denied'
-        ? 'Notifications are blocked for this app. Re-enable them in iOS Settings → Notifications → Pushgate.'
-        : 'Notifications are not enabled on this device.';
+  $('device-state').textContent = problem || failure || (active
+    ? `Notifications are enabled on this device (permission: ${permission}).`
+    : permission === 'denied'
+      ? 'Notifications are blocked for this app. Re-enable them in iOS Settings → Notifications → Pushgate.'
+      : 'Notifications are not enabled on this device.');
   $('subscribe-form').hidden = Boolean(problem) || active || permission === 'denied';
   $('unsubscribe-btn').hidden = !active;
   $('test-self').hidden = !active;

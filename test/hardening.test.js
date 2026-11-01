@@ -424,12 +424,12 @@ test('requests for another host name are refused; the health check is exempt', a
   assert.equal((await t.request({ path: '/healthz', headers: { Host: '127.0.0.1:8080' } })).status, 200);
 });
 
-test('the CSP enforces Trusted Types and the web app creates only its own policy', async () => {
+test('the web app uses no HTML sinks and registers its service worker without Trusted Types', async () => {
   const t = await app();
   const csp = (await t.request({ path: '/' })).headers['content-security-policy'];
-  assert.match(csp, /require-trusted-types-for 'script'/);
-  assert.match(csp, /trusted-types pushgate(;|$)/);
+  // Trusted Types enforcement is new in Safari; it must not stand between iOS and Web Push.
+  assert.doesNotMatch(csp, /trusted-types/);
   const js = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
-  assert.match(js, /createPolicy\('pushgate'/);
+  assert.match(js, /serviceWorker\.register\('\/sw\.js'/);
   assert.doesNotMatch(js, /innerHTML|insertAdjacentHTML|document\.write/);
 });

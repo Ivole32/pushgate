@@ -11,10 +11,9 @@ export const CSP = [
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
-  // DOM sinks that turn strings into HTML or script are refused; the web app creates its one
-  // script URL (the service worker) through the "pushgate" policy.
-  "require-trusted-types-for 'script'",
-  'trusted-types pushgate',
+  // No Trusted Types (require-trusted-types-for): Safari's implementation is new, and the
+  // service worker that Web Push depends on must register on every iOS version. The web app
+  // uses no HTML sinks (checked by a test).
 ].join('; ');
 
 export function setSecurityHeaders(res, { hsts }) {

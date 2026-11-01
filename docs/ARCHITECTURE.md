@@ -144,8 +144,7 @@ see [PLUGINS.md](PLUGINS.md#accounts) for serving several accounts.
    is made by pushgate itself to the host that was checked. Endpoints with a fragment or an empty
    query are refused, so one subscription has one spelling.
 10. **Content is data, never markup.** The service worker passes title/body as plain strings to
-   `showNotification`; the admin UI uses only `textContent`; CSP forbids inline script and enforces
-   Trusted Types. Requests must name the host of `PUBLIC_ORIGIN` (421 otherwise; DNS rebinding).
+   `showNotification`; the admin UI uses only `textContent`; CSP forbids inline script. Requests must name the host of `PUBLIC_ORIGIN` (421 otherwise; DNS rebinding).
    Notification click always opens the app's own start page — requests cannot supply URLs or actions.
    The title is prefixed with the sending key's name, and tags are scoped per service (rotation
    lineage) and HMAC'd with the pepper, so services cannot impersonate or replace each other.

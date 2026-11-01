@@ -225,9 +225,8 @@ export default function setup(pushgate) {
 | `flash(message, kind)`, `reload()` | Show a message; reload the session and views |
 
 The files are same-origin, so the Content Security Policy does not change; it still forbids
-inline scripts and styles and external resources, and it enforces Trusted Types: `innerHTML`,
-`insertAdjacentHTML`, `document.write` and script URLs from strings throw. Build elements with
-`createElement` and `textContent`. Plugin scripts run with the full rights of the
+inline scripts and styles and external resources. Build elements with `createElement` and
+`textContent`, never `innerHTML`, for anything that comes from a server or a user. Plugin scripts run with the full rights of the
 signed-in administrator in the browser.
 
 ## Migrations
