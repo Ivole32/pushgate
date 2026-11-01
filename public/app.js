@@ -158,19 +158,46 @@ async function enroll(token, name, { confirmAccount = false } = {}) {
 
 // ---------- push subscription ----------
 
+// Push is available when the browser has service workers and the Push API (the
+// registration's pushManager, the standard check; the global PushManager is not exposed
+// everywhere). The Notification global is optional: without it, subscribing asks for the
+// permission itself. Returns null, or a message that says what is missing.
+const hasPushApi = () => 'PushManager' in window
+  || ('ServiceWorkerRegistration' in window && 'pushManager' in ServiceWorkerRegistration.prototype);
+
 function pushSupport() {
   if (!window.isSecureContext) return 'This page is not served over HTTPS.';
-  if (!('serviceWorker' in navigator)) return 'This browser does not support service workers.';
-  if (!('PushManager' in window) || !('Notification' in window)) {
-    return isIOS() && !isStandalone()
-      ? 'Open Pushgate from the Home Screen icon to enable notifications.'
-      : 'This browser does not support Web Push (iOS requires 16.4 or later and a Home Screen web app).';
-  }
-  return null;
+  if (isIOS() && !isStandalone() && !hasPushApi()) return 'Open Pushgate from the Home Screen icon to enable notifications.';
+  if ('serviceWorker' in navigator && hasPushApi()) return null;
+  if (!isIOS()) return `This browser does not support Web Push. (${pushDetails()})`;
+  return 'iOS does not offer push notifications to this Home Screen app. They need iOS 16.4 or later, and iOS '
+    + 'enables them only for apps added to the Home Screen from Safari with their web app manifest: remove the '
+    + 'Pushgate icon, open this address in Safari, choose Share → Add to Home Screen, and open it from the new icon. '
+    + `If that does not help, check that notifications and the Push API are not turned off under Settings → Apps → Safari → Advanced → Feature Flags. (${pushDetails()})`;
+}
+
+// What the browser reports, so a problem can be told apart (and reported) precisely.
+function pushDetails() {
+  const ios = /OS (\d+)[._](\d+)/.exec(navigator.userAgent);
+  const yes = (v) => (v ? 'yes' : 'no');
+  return [
+    ios ? `iOS ${ios[1]}.${ios[2]}` : null,
+    `Home Screen app: ${yes(isStandalone())}`,
+    `service worker: ${yes('serviceWorker' in navigator)}`,
+    `Push API: ${yes(hasPushApi())}`,
+    `notification permission API: ${yes('Notification' in window)}`,
+  ].filter(Boolean).join(', ');
 }
 
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+// 'granted', 'denied' or 'default', from the Notification API or, without it, the Push API.
+async function notificationPermission(reg) {
+  if ('Notification' in window) return Notification.permission;
+  const state = await reg.pushManager.permissionState({ userVisibleOnly: true });
+  return state === 'prompt' ? 'default' : state;
+}
 
 // The CSP requires Trusted Types for script URLs; this policy only ever produces the service
 // worker's URL.
@@ -189,16 +216,21 @@ async function refreshDeviceState(devices) {
   const problem = pushSupport();
   const known = devices.some((d) => d.id === localStorage.getItem(DEVICE_KEY));
   let sub = null;
-  if (!problem) sub = await (await registration()).pushManager.getSubscription();
+  let permission = 'default';
+  if (!problem) {
+    const reg = await registration();
+    sub = await reg.pushManager.getSubscription();
+    permission = await notificationPermission(reg);
+  }
   const active = Boolean(sub && known);
   $('device-state').textContent = problem
     ? problem
     : active
-      ? `Notifications are enabled on this device (permission: ${Notification.permission}).`
-      : Notification.permission === 'denied'
+      ? `Notifications are enabled on this device (permission: ${permission}).`
+      : permission === 'denied'
         ? 'Notifications are blocked for this app. Re-enable them in iOS Settings → Notifications → Pushgate.'
         : 'Notifications are not enabled on this device.';
-  $('subscribe-form').hidden = Boolean(problem) || active || Notification.permission === 'denied';
+  $('subscribe-form').hidden = Boolean(problem) || active || permission === 'denied';
   $('unsubscribe-btn').hidden = !active;
   $('test-self').hidden = !active;
 }
@@ -207,8 +239,11 @@ async function subscribe(event) {
   event.preventDefault();
   const form = event.target;
   // Must run directly from the tap: iOS only shows the permission prompt for a user gesture.
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') throw new Error('Notification permission was not granted.');
+  // Without the Notification API, pushManager.subscribe() below asks instead.
+  if ('Notification' in window) {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') throw new Error('Notification permission was not granted.');
+  }
   const reg = await registration();
   await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
