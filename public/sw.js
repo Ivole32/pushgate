@@ -42,8 +42,19 @@ self.addEventListener('push', (event) => {
   }
   // iOS revokes push permission if a push does not display a notification, so always show one.
   const { title, options } = toNotification(data);
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(Promise.all([self.registration.showNotification(title, options), recordReceipt()]));
 });
+
+// When a notification last reached this device, for the web app's "This device" card. Only the
+// time is kept, never content. A failure here must not affect showing the notification.
+async function recordReceipt() {
+  try {
+    const cache = await caches.open('pushgate-state');
+    await cache.put('/last-push', new Response(JSON.stringify({ at: Date.now() }), { headers: { 'Content-Type': 'application/json' } }));
+  } catch {
+    // storage unavailable
+  }
+}
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();

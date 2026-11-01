@@ -472,7 +472,14 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
   Mode → Configure Web Browsing*. Safari's *Block All Cookies* setting has the same effect.
 - **Permission prompt never appears:** it needs a tap; if previously denied, enable it in
   *Settings → Notifications → Pushgate* (only exists after adding to the Home Screen).
-- **API says `delivered` but nothing shows:** check Focus/Do Not Disturb and notification summary
+- **"This device" forgets that it is enabled:** the app finds its device again from the phone's
+  push subscription. If it says iOS no longer has that subscription, tap *Enable notifications*
+  again; iOS drops subscriptions e.g. after notifications were not shown or the app was
+  offloaded.
+- **API says `delivered` but nothing shows:** the "This device" card shows when a notification
+  last reached the phone. If that time does not change after a test, the push did not reach the
+  app (Lockdown Mode, Focus, or notifications turned off for Pushgate); if it changes but nothing
+  is shown, check Focus/Do Not Disturb and notification summary
   settings; `low` urgency may be delayed by iOS; the device's *minimum priority* may filter it
   (`filtered` in the response).
 - **`failed` with status 403 on the device:** VAPID problem — `VAPID_SUBJECT` must be a valid

@@ -433,3 +433,14 @@ test('the web app uses no HTML sinks and registers its service worker without Tr
   assert.match(js, /serviceWorker\.register\('\/sw\.js'/);
   assert.doesNotMatch(js, /innerHTML|insertAdjacentHTML|document\.write/);
 });
+
+test('devices list a fingerprint of their endpoint, never the endpoint itself', async () => {
+  const t = await app();
+  const device = addDevice(t);
+  const s = adminSession(t, DEFAULT_ACCOUNT);
+  const r = await t.request({ path: '/admin/api/devices', headers: s.readHeaders });
+  const listed = r.json.devices.find((d) => d.id === device.id);
+  const expected = (await import('node:crypto')).createHash('sha256').update(device.subscription.endpoint).digest('hex').slice(0, 32);
+  assert.equal(listed.endpoint_hash, expected, 'the browser computes the same value from its subscription');
+  assert.ok(!r.text.includes(device.subscription.endpoint), 'the endpoint is not returned');
+});

@@ -214,9 +214,42 @@ async function registration() {
   return navigator.serviceWorker.register('/sw.js', { scope: '/' });
 }
 
+// The id of this browser's device on the server. It is kept in local storage, but found again
+// from the push subscription when that storage was cleared (iOS may do so, e.g. in Lockdown
+// Mode), so the app does not forget that this device is enabled.
+let thisDeviceId = null;
+const stored = {
+  get: () => { try { return localStorage.getItem(DEVICE_KEY); } catch { return null; } },
+  set: (id) => { try { localStorage.setItem(DEVICE_KEY, id); } catch { /* storage unavailable */ } },
+  remove: () => { try { localStorage.removeItem(DEVICE_KEY); } catch { /* storage unavailable */ } },
+};
+
+// Same fingerprint as the server's endpoint_hash.
+async function endpointHash(endpoint) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+// The service worker records when a notification last reached this device (see sw.js).
+async function lastReceivedPush() {
+  try {
+    const r = await (await caches.open('pushgate-state')).match('/last-push');
+    return r ? (await r.json()).at : null;
+  } catch {
+    return null;
+  }
+}
+
+async function showReceipt() {
+  const at = thisDeviceId ? await lastReceivedPush() : null;
+  $('device-receipt').hidden = !thisDeviceId;
+  $('device-receipt').textContent = at
+    ? `Last notification received by this device: ${fmt(at)}.`
+    : 'No notification has reached this device yet. Send a test; if this line does not change within a minute, the notification did not arrive (check Focus and Settings → Notifications → Pushgate).';
+}
+
 async function refreshDeviceState(devices) {
   const problem = pushSupport();
-  const known = devices.some((d) => d.id === localStorage.getItem(DEVICE_KEY));
   let sub = null;
   let permission = 'default';
   let failure = null;
@@ -232,15 +265,23 @@ async function refreshDeviceState(devices) {
       failure = `The notification service worker could not be started: ${reason}. (${pushDetails()})`;
     }
   }
-  const active = Boolean(sub && known);
-  $('device-state').textContent = problem || failure || (active
-    ? `Notifications are enabled on this device (permission: ${permission}).`
-    : permission === 'denied'
-      ? 'Notifications are blocked for this app. Re-enable them in iOS Settings → Notifications → Pushgate.'
-      : 'Notifications are not enabled on this device.');
+  const hash = sub ? await endpointHash(sub.endpoint) : null;
+  const mine = hash ? devices.find((d) => d.endpoint_hash === hash) : null;
+  const before = stored.get();
+  if (mine) stored.set(mine.id);
+  thisDeviceId = mine ? mine.id : null;
+  const active = Boolean(mine);
+  let state;
+  if (active) state = `Notifications are enabled on this device (permission: ${permission}).`;
+  else if (permission === 'denied') state = 'Notifications are blocked for this app. Re-enable them in iOS Settings → Notifications → Pushgate.';
+  else if (sub) state = 'This device has a push subscription, but this server does not know it (it may have been removed). Tap "Enable notifications" to register it.';
+  else if (devices.some((d) => d.id === before)) state = 'This device was registered, but iOS no longer has its push subscription. Tap "Enable notifications" to register it again.';
+  else state = 'Notifications are not enabled on this device.';
+  $('device-state').textContent = problem || failure || state;
   $('subscribe-form').hidden = Boolean(problem) || active || permission === 'denied';
   $('unsubscribe-btn').hidden = !active;
   $('test-self').hidden = !active;
+  await showReceipt();
 }
 
 async function subscribe(event) {
@@ -261,17 +302,17 @@ async function subscribe(event) {
     min_priority: form.min_priority.value,
     subscription: sub.toJSON(),
   });
-  localStorage.setItem(DEVICE_KEY, device.id);
+  stored.set(device.id);
   flash('Notifications enabled on this device.');
   await loadAll();
 }
 
 async function unsubscribe() {
-  const id = localStorage.getItem(DEVICE_KEY);
+  const id = thisDeviceId ?? stored.get();
   const sub = await (await registration()).pushManager.getSubscription();
   if (sub) await sub.unsubscribe();
   if (id) await api('DELETE', `/admin/api/devices/${encodeURIComponent(id)}`).catch(() => {});
-  localStorage.removeItem(DEVICE_KEY);
+  stored.remove();
   flash('Notifications disabled on this device.');
   await loadAll();
 }
@@ -280,6 +321,8 @@ async function testPush(deviceId) {
   const r = await api('POST', '/admin/api/test-push', deviceId ? { device_id: deviceId } : {});
   flash(`Test: ${r.status} (${r.devices.delivered}/${r.devices.targeted} delivered)`, r.status === 'delivered' ? 'info' : 'error');
   await loadAll();
+  // The push service delivers a moment later; show when it reached this device.
+  setTimeout(() => guarded(showReceipt)(), 5000);
 }
 
 // ---------- admin sections ----------
@@ -287,7 +330,11 @@ async function testPush(deviceId) {
 async function loadDevices() {
   const { devices, vapid_public_key } = await api('GET', '/admin/api/devices');
   vapidKey = vapid_public_key;
-  const mine = localStorage.getItem(DEVICE_KEY);
+  return devices;
+}
+
+function renderDevices(devices) {
+  const mine = thisDeviceId;
   fill('devices', devices.map((d) => {
     const select = document.createElement('select');
     for (const p of ['low', 'normal', 'high']) select.append(new Option(`min: ${p}`, p, false, p === d.min_priority));
@@ -305,13 +352,12 @@ async function loadDevices() {
         { label: 'Remove', className: 'danger', onClick: async () => {
           if (!confirm(`Remove device "${d.name}"?`)) return;
           await api('DELETE', `/admin/api/devices/${encodeURIComponent(d.id)}`);
-          if (d.id === mine) localStorage.removeItem(DEVICE_KEY);
+          if (d.id === mine) stored.remove();
           await loadAll();
         } },
       ],
     });
   }), 'No devices registered.');
-  return devices;
 }
 
 function showNewKey(key) {
@@ -410,7 +456,10 @@ async function loadEvents(append = false) {
 
 async function loadAll() {
   const devices = await loadDevices();
-  await Promise.all([refreshDeviceState(devices), loadKeys(), loadOverview(), loadPasskeys(), loadEvents()]);
+  // This device is identified first, so the list can mark it.
+  await refreshDeviceState(devices);
+  renderDevices(devices);
+  await Promise.all([loadKeys(), loadOverview(), loadPasskeys(), loadEvents()]);
 }
 
 // ---------- plugins ----------
@@ -565,7 +614,7 @@ $('dismiss-key').addEventListener('click', () => {
 });
 $('subscribe-form').addEventListener('submit', guarded(subscribe));
 $('unsubscribe-btn').addEventListener('click', guarded(unsubscribe));
-$('test-self').addEventListener('click', guarded(() => testPush(localStorage.getItem(DEVICE_KEY))));
+$('test-self').addEventListener('click', guarded(() => testPush(thisDeviceId)));
 $('test-all').addEventListener('click', guarded(() => testPush(null)));
 $('paused').addEventListener('change', guarded(async (event) => {
   await api('PUT', '/admin/api/settings', { sending_paused: event.target.checked });

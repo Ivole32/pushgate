@@ -50,6 +50,9 @@ export function createDevices(db, { now = () => Date.now() } = {}) {
     id: row.id,
     name: row.name,
     push_service: new URL(row.endpoint).hostname,
+    // Fingerprint of the endpoint (which is never returned): lets a browser recognise its own
+    // device from its push subscription, even when its local storage was cleared.
+    endpoint_hash: crypto.createHash('sha256').update(row.endpoint).digest('hex').slice(0, 32),
     min_priority: row.min_priority,
     created_at: row.created_at,
     last_success_at: row.last_success_at,
