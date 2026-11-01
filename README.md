@@ -472,10 +472,16 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
   Mode → Configure Web Browsing*. Safari's *Block All Cookies* setting has the same effect.
 - **Permission prompt never appears:** it needs a tap; if previously denied, enable it in
   *Settings → Notifications → Pushgate* (only exists after adding to the Home Screen).
-- **"This device" forgets that it is enabled:** the app finds its device again from the phone's
-  push subscription. If it says iOS no longer has that subscription, tap *Enable notifications*
-  again; iOS drops subscriptions e.g. after notifications were not shown or the app was
-  offloaded.
+- **"This device" forgets that it is enabled, and notifications never arrive although the API
+  says `delivered`:** the Home Screen app was probably added while you were signed in to
+  pushgate in Safari, with a version before this fix. iOS then copied the service worker that
+  the Safari tab had registered into the app, and that copy never receives pushes. Delete the
+  Home Screen app, open pushgate's address in Safari once (the current version removes the
+  service worker there), add it to the Home Screen again, sign in inside the app and enable
+  notifications. Remove the old "iPhone" entries under *Devices*.
+- **"This device" says iOS no longer has its push subscription:** tap *Enable notifications*
+  again; the new subscription replaces the old entry. iOS drops subscriptions e.g. after
+  notifications were not shown or the app was offloaded.
 - **API says `delivered` but nothing shows:** the "This device" card shows when a notification
   last reached the phone. If that time does not change after a test, the push did not reach the
   app (Lockdown Mode, Focus, or notifications turned off for Pushgate); if it changes but nothing

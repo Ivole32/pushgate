@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 import { after, test } from 'node:test';
 import { DEFAULT_ACCOUNT, UnknownAccountError } from '../src/accounts.js';
 import { checkEndpoint } from '../src/devices.js';
@@ -443,4 +444,37 @@ test('devices list a fingerprint of their endpoint, never the endpoint itself', 
   const expected = (await import('node:crypto')).createHash('sha256').update(device.subscription.endpoint).digest('hex').slice(0, 32);
   assert.equal(listed.endpoint_hash, expected, 'the browser computes the same value from its subscription');
   assert.ok(!r.text.includes(device.subscription.endpoint), 'the endpoint is not returned');
+});
+
+// Runs the web app's push detection code (public/app.js) against a simulated browser.
+function webAppPush({ standalone, registrations = [] }) {
+  const src = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  const code = src.slice(src.indexOf('const hasPushApi'), src.indexOf("// The id of this browser's device"));
+  const unregistered = [];
+  const window = { isSecureContext: true, PushManager: function PushManager() {}, Notification: {}, matchMedia: () => ({ matches: standalone }) };
+  const navigator = {
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+    platform: 'iPhone', maxTouchPoints: 5, standalone,
+    serviceWorker: {
+      getRegistrations: async () => registrations.map((r) => ({ unregister: async () => { unregistered.push(r); return true; } })),
+      register: async () => { throw new Error('must not register'); },
+    },
+  };
+  const api = vm.runInNewContext(`${code}; ({ pushSupport, removeSafariServiceWorker })`, { window, navigator });
+  return { ...api, unregistered };
+}
+
+test('on iOS, a Safari tab never uses push and removes service workers that would be copied into the Home Screen app', async () => {
+  const tab = webAppPush({ standalone: false, registrations: ['old'] });
+  assert.match(tab.pushSupport(), /Open Pushgate from the Home Screen icon/, 'even though the Safari tab offers the Push API');
+  await tab.removeSafariServiceWorker();
+  assert.deepEqual(tab.unregistered, ['old']);
+
+  const homeScreen = webAppPush({ standalone: true, registrations: ['own'] });
+  assert.equal(homeScreen.pushSupport(), null);
+  await homeScreen.removeSafariServiceWorker();
+  assert.deepEqual(homeScreen.unregistered, [], 'the Home Screen app keeps its own service worker');
+
+  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+  assert.match(html, /<form id="subscribe-form" hidden>/, 'the enable form waits until the device state is known');
 });

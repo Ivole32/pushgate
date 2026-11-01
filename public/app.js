@@ -166,9 +166,11 @@ const hasPushApi = () => 'PushManager' in window
   || ('ServiceWorkerRegistration' in window && 'pushManager' in ServiceWorkerRegistration.prototype);
 
 // Every message ends with what the browser reports, so a problem can be reported precisely.
+// On iOS, Web Push works only in the Home Screen app, so a Safari tab never uses push (and never
+// registers the service worker, see removeSafariServiceWorker), even where it offers the API.
 function pushSupport() {
   if (!window.isSecureContext) return `This page is not served over HTTPS. (${pushDetails()})`;
-  if (isIOS() && !isStandalone() && !hasPushApi()) return `Open Pushgate from the Home Screen icon to enable notifications. (${pushDetails()})`;
+  if (isIOS() && !isStandalone()) return `Open Pushgate from the Home Screen icon to enable notifications. (${pushDetails()})`;
   if ('serviceWorker' in navigator && hasPushApi()) return null;
   if (!isIOS()) return `This browser does not support Web Push. (${pushDetails()})`;
   // Lockdown Mode turns off service workers, and with them push, for websites and Home Screen
@@ -212,6 +214,15 @@ async function notificationPermission(reg) {
 
 async function registration() {
   return navigator.serviceWorker.register('/sw.js', { scope: '/' });
+}
+
+// When a site is added to the Home Screen, iOS copies its data from Safari into the new app,
+// apparently including a service worker registered in the Safari tab. Such a copied worker
+// never receives pushes and loses its subscription on restart. So a Safari tab on iOS removes
+// any registration (earlier versions created one after sign-in) and never creates one.
+async function removeSafariServiceWorker() {
+  if (!isIOS() || isStandalone() || !('serviceWorker' in navigator)) return;
+  for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister();
 }
 
 // The id of this browser's device on the server. It is kept in local storage, but found again
@@ -278,6 +289,8 @@ async function refreshDeviceState(devices) {
   else if (devices.some((d) => d.id === before)) state = 'This device was registered, but iOS no longer has its push subscription. Tap "Enable notifications" to register it again.';
   else state = 'Notifications are not enabled on this device.';
   $('device-state').textContent = problem || failure || state;
+  // Hidden until this point (index.html), so a tap cannot register the device again before the
+  // app knows that it is already registered.
   $('subscribe-form').hidden = Boolean(problem) || active || permission === 'denied';
   $('unsubscribe-btn').hidden = !active;
   $('test-self').hidden = !active;
@@ -297,12 +310,18 @@ async function subscribe(event) {
   await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(vapidKey) });
+  const previous = thisDeviceId ?? stored.get();
   const { device } = await api('POST', '/admin/api/devices', {
     name: form.name.value.trim(),
     min_priority: form.min_priority.value,
     subscription: sub.toJSON(),
   });
   stored.set(device.id);
+  // A new subscription replaces this browser's earlier entry, whose subscription iOS dropped,
+  // instead of adding one more device that can never receive anything.
+  if (previous && previous !== device.id) {
+    await api('DELETE', `/admin/api/devices/${encodeURIComponent(previous)}`).catch(() => {});
+  }
   flash('Notifications enabled on this device.');
   await loadAll();
 }
@@ -636,4 +655,5 @@ $('logout').addEventListener('click', guarded(async () => {
 
 takeEnrollmentLink();
 window.addEventListener('hashchange', takeEnrollmentLink);
+guarded(removeSafariServiceWorker)();
 guarded(boot)();
