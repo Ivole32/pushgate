@@ -538,4 +538,4 @@ pushgate is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md
   damages arising from its use.
 
 This summary is for convenience; the [license text](LICENSE.md) is what applies. For commercial
-use, ask the author for a separate license.
+use, ask the author ([@Ivole32](https://github.com/Ivole32)) for a separate license.

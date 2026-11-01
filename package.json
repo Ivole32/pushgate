@@ -4,6 +4,12 @@
   "description": "Minimal, self-hosted Web Push notification gateway for an iOS Home Screen web app",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ivole32/pushgate.git"
+  },
+  "homepage": "https://github.com/Ivole32/pushgate#readme",
+  "bugs": "https://github.com/Ivole32/pushgate/issues",
   "type": "module",
   "exports": {
     ".": "./src/index.js"
