@@ -243,14 +243,19 @@ test('passkey enrollment requires a one-time token; login works with the enrolle
   assert.equal(del.status, 409);
 });
 
-test('admin login failures are rate limited per client', async () => {
+test('admin login failures are rate limited per client, but a passkey sign-in is never blocked', async () => {
   const t = await app({ env: { AUTH_FAILURE_LIMIT: '3' } });
   const post = (path, body) => t.request({ method: 'POST', path, body, headers: { Origin: ORIGIN } });
   for (let i = 0; i < 3; i++) {
     assert.equal((await post('/admin/api/enroll/options', { token: 'pge_' + 'B'.repeat(43) })).status, 401);
   }
-  assert.equal((await post('/admin/api/login/options', {})).status, 429);
   assert.equal((await post('/admin/api/enroll/options', { token: 'pge_' + 'B'.repeat(43) })).status, 429);
+  // Sign-in stays open: a neighbour's failures must not lock the administrator out. Further
+  // failed attempts from the blocked client get 429 and are not counted.
+  const options = await post('/admin/api/login/options', {});
+  assert.equal(options.status, 200);
+  const bogus = { id: 'unknown', rawId: 'unknown', type: 'public-key', response: { clientDataJSON: 'e30', authenticatorData: 'AA', signature: 'AA' }, clientExtensionResults: {} };
+  assert.equal((await post('/admin/api/login/verify', { challenge_id: options.json.challenge_id, response: bogus })).status, 429);
 });
 
 test('the PWA and admin API are only served to admin networks', async () => {

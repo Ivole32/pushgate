@@ -2,27 +2,42 @@
 // the delivery code and never returned by any API. Every device belongs to one account; all
 // functions take the account first.
 import crypto from 'node:crypto';
-import { checkAccountId } from './accounts.js';
+import { checkAccountId, requireAccount } from './accounts.js';
 
 export function hostAllowed(hostname, allowed) {
   const h = hostname.toLowerCase();
   return allowed.some((a) => h === a || h.endsWith('.' + a));
 }
 
-// Returns { endpoint, p256dh, auth } or throws Error with a client-safe message.
-export function checkSubscription(sub, allowedHosts) {
+// Returns the endpoint as a URL, or throws Error with a client-safe message. Checked when a
+// device is registered and again before every delivery.
+export function checkEndpoint(endpoint, allowedHosts) {
   let url;
   try {
-    url = new URL(sub.endpoint);
+    url = new URL(endpoint);
   } catch {
     throw new Error('subscription endpoint is not a URL');
   }
   if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) {
     throw new Error('subscription endpoint must be a plain https URL');
   }
-  if (!hostAllowed(url.hostname, allowedHosts)) {
+  // Only plain DNS names: URL parsers disagree on hosts with other characters (e.g.
+  // "a;.push.apple.com" is one host for WHATWG and "a" for Node's legacy parser), so the check
+  // could pass for one host while a library connects to another.
+  if (!/^[a-z0-9.-]+$/.test(url.hostname) || !hostAllowed(url.hostname, allowedHosts)) {
     throw new Error('subscription endpoint is not a known push service');
   }
+  // The fragment and an empty query never reach the push service: they would let the same
+  // subscription be stored under several endpoint strings.
+  if (url.hash || url.href.includes('#') || url.href.endsWith('?')) {
+    throw new Error('subscription endpoint must not have a fragment or an empty query');
+  }
+  return url;
+}
+
+// Returns { endpoint, p256dh, auth } or throws Error with a client-safe message.
+export function checkSubscription(sub, allowedHosts) {
+  const url = checkEndpoint(sub.endpoint, allowedHosts);
   const p256dh = Buffer.from(sub.keys.p256dh, 'base64url');
   if (p256dh.length !== 65 || p256dh[0] !== 4) throw new Error('subscription p256dh key is invalid');
   const auth = Buffer.from(sub.keys.auth, 'base64url');
@@ -61,6 +76,7 @@ export function createDevices(db, { now = () => Date.now() } = {}) {
       return { device: get(accountId, existing.id), created: false };
     }
     if (count(accountId) >= maxDevices) return null;
+    requireAccount(db, accountId);
     const id = crypto.randomBytes(16).toString('base64url');
     db.prepare(`INSERT INTO devices (id, account_id, name, endpoint, p256dh, auth, min_priority, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, accountId, name, endpoint, p256dh, auth, minPriority, now());

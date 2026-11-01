@@ -79,8 +79,16 @@ Each service has exactly one implementation: the built-in one unless a plugin pr
 | Service | Signature | Built-in |
 |---|---|---|
 | `rateLimiter` | `(perMinute) => ({ take(id) })`; `take` returns 0 when allowed, otherwise seconds to wait | In-memory token bucket ([src/ratelimit.js](../src/ratelimit.js)) |
-| `failureLimiter` | `({ limit, windowMs, blockMs }) => ({ blockedFor(id), fail(id), reset(id) })` | In-memory failure counter |
-| `transport` | `async (subscription, payload, options) => ({ statusCode })`; throws an error with `statusCode` on failure, like `web-push` | `web-push`'s `sendNotification` |
+| `failureLimiter` | `({ limit, windowMs, blockMs }) => ({ blockedFor(id), fail(id), reset(id) })`; `blockedFor` returns seconds (0 = not blocked), `fail` returns `true` once the client is blocked | In-memory failure counter |
+| `transport` | `async (subscription, payload, options) => ({ statusCode })`; throws an error with `statusCode` on failure, like `web-push`. `options.timeout` is the deadline for the whole attempt | `createTransport()` in [src/push.js](../src/push.js): `web-push` builds the request; the response is capped at 64 KiB |
+
+The limiter methods are synchronous. Their answers are checked: anything but a finite number
+of seconds (for example the Promise of an `async` method, or `undefined`) is logged and refused
+for 60 seconds, never treated as "allowed". A Redis-backed limiter therefore has to answer from
+local state and synchronise in the background.
+
+The endpoint passed to `transport` has already been checked against `PUSH_ENDPOINT_HOSTS` (a
+plain DNS name ending in one of them, port 443); connect to exactly that host.
 | `apiAccess` | `(client, { config, fallback }) => boolean`: may this address reach the sending API? | `TRUSTED_CIDRS` |
 
 `apiAccess` decides before any API key is looked at. Only an explicit `true` allows a request.
@@ -92,7 +100,7 @@ in the configuration.
 
 | Hook | When | Arguments | Effect |
 |---|---|---|---|
-| `beforeSend` | After the key, scopes, rate limits, kill switches and body checks, before anything is sent | `{ account, key, client, notification: { priority, ttl } }` | Throw an `HttpError` to refuse with that response. Any other error refuses with 500. Later hooks do not run. |
+| `beforeSend` | After the key, scopes, kill switches, body checks and rate limits, before anything is sent | `{ account, key, client, notification: { priority, ttl } }` | Throw an `HttpError` to refuse with that response. Any other error refuses with 500. Later hooks do not run. |
 | `afterDelivery` | After delivery, before the response | `{ account, key, client, outcome }` | Errors are logged and ignored: the notification is already out, and an error response would make the sender send it again. |
 
 `account` is the sending key's account (`{ id, name, sending_paused, created_at }`).
@@ -107,12 +115,14 @@ by accident.
 |---|---|---|
 | `method` | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | required |
 | `path` | An exact path such as `/signup/verify`. No patterns or query strings. Not under `/api/`, `/admin/api/` or `/plugins/`, not `/healthz`, not a web app file | required |
-| `zone` | `app`: the same networks as the web app (`ADMIN_PUBLIC` / `ADMIN_CIDRS`). `public`: every network. All methods of one path share a zone | `app` |
-| `auth` | `session`: signed-in session (and CSRF token for changes). `fresh`: also a passkey confirmation from the last 5 minutes. `none`: anyone, rate limited per client like the login endpoints | `session` |
+| `zone` | `app`: the same networks as the web app (`ADMIN_PUBLIC` / `ADMIN_CIDRS`). `public`: every network, only with `auth: 'none'` (sessions belong to the web app's networks). All methods of one path share a zone | `app` |
+| `auth` | `session`: signed-in session (and CSRF token for changes), limited per account like the web app's own requests. `fresh`: also a passkey confirmation from the last 5 minutes. `none`: anyone, rate limited per client (`RATE_LIMIT_PLUGIN_ANONYMOUS_PER_MINUTE`, default 60, a bucket separate from the login endpoints) | `session` |
 | `crossOrigin` | `true` skips the same-origin check for changes, e.g. for webhooks from a payment provider. Only with `auth: 'none'`; the handler must authenticate the request itself (e.g. a webhook signature) | `false` |
 | `handler` | `async ({ req, res, url, client, session, ctx }) => result` | required |
 
-A handler returns a value (sent as JSON with status 200) or `{ status, body }`. To answer
+A handler returns a value (sent as JSON with status 200) or `{ status, body }`: an object with
+exactly these keys (`body` may be left out, e.g. for 204) and a status from 200 to 599. Any other
+object, even one with a `status` field, is sent as the body with status 200. To answer
 differently, write to `res` and return nothing. Throw an `HttpError` to reject. Plugin routes
 pass the same checks as everything else first: forwarding-header rules, network zone, origin,
 session. With `auth: 'session'` or `'fresh'`, `session.accountId` is the signed-in account;
@@ -122,8 +132,8 @@ a handler must only touch that account's data.
 
 | `ctx.` | Use |
 |---|---|
-| `accounts` | `create({ name })`, `get(id)`, `list()`, `rename(id, name)`, `isPaused(id)`, `setPaused(id, paused)`, `remove(id)` (deletes the account and all its data; not the default account) |
-| `auth.createEnrollmentToken(accountId, { ttlMs })` | One-time token to enroll a passkey for the account: its first one (sign-up) or a recovery passkey. 1 minute to 24 hours, default 15 minutes |
+| `accounts` | `create({ name })` (1-64 characters, no control characters), `get(id)`, `list()`, `rename(id, name)`, `isPaused(id)`, `setPaused(id, paused)`, `remove(id)` (deletes the account and all its data; not the default account) |
+| `auth.createEnrollmentToken(accountId, { ttlMs, replacePasskeys })` | One-time token to enroll a passkey for the account: its first one (sign-up) or a recovery passkey. 1 minute to 24 hours, default 15 minutes. `replacePasskeys: true` removes the account's other passkeys when the token is used |
 | `keys`, `devices`, `audit` | Account-scoped: every function takes the account id first, e.g. `keys.list(accountId)` |
 | `multiAccount`, `config`, `log`, `db` | Mode, configuration, logger, database (for the plugin's own tables) |
 
@@ -153,8 +163,14 @@ verified email address, a payment, a waiting period for recovery), then creates 
 needed and issues an enrollment token. The web app enrolls the passkey with it: either your
 plugin screen calls `pushgate.enroll(token, name)`, or you send a link to
 `https://<your host>/#enroll=<token>`, which fills in the token (the fragment never reaches the
-server and is removed from the address bar). Enrolling with a token signs out every other
-session of that account and alerts its devices, which is what recovery needs.
+server and is removed from the address bar; in multi-account mode the web app names the account
+and asks for confirmation first, so a link from a stranger cannot sign someone up into the
+stranger's account). Enrolling with a token signs out every other session of that account,
+spends the account's other open tokens and alerts its devices.
+
+Existing passkeys stay, unless the token was created with `replacePasskeys: true`. For recovery
+after a lost or possibly stolen passkey, use that option: otherwise a passkey someone else added
+can sign in again right after the recovery.
 
 ```js
 // Sign-up route: after your own verification, create the account and hand out a token.
@@ -173,7 +189,7 @@ accounts with `accounts list`, `accounts create --name <name>` and `accounts rem
 
 ## Features
 
-`features` is a plain JSON object. The flags of all plugins are merged (two plugins setting
+`features` is a plain JSON object (any flag name, including names like `constructor`). The flags of all plugins are merged (two plugins setting
 the same flag is a startup error) and returned to the web app as `features` from
 `GET /admin/api/session`. Without plugins it is `{}`.
 
@@ -181,7 +197,8 @@ the same flag is a startup error) and returned to the web app as `features` from
 
 `web: { dir, entry }` adds screens to the web app. `dir` is an absolute directory; its `.js`,
 `.css`, `.html`, `.png` and `.webmanifest` files are served under `/plugins/<plugin name>/`, read
-once at startup. The web app imports `entry` (a module in `dir`) and calls its default export
+once at startup. Hidden files and directories (`.name`), `node_modules` and symbolic links are
+skipped; still, give the screens a directory of their own, not the plugin's package root. The web app imports `entry` (a module in `dir`) and calls its default export
 with a small API:
 
 ```js
@@ -208,8 +225,9 @@ export default function setup(pushgate) {
 | `flash(message, kind)`, `reload()` | Show a message; reload the session and views |
 
 The files are same-origin, so the Content Security Policy does not change; it still forbids
-inline scripts and styles and external resources. Use `textContent`, never `innerHTML`, for
-anything that comes from a server or a user. Plugin scripts run with the full rights of the
+inline scripts and styles and external resources, and it enforces Trusted Types: `innerHTML`,
+`insertAdjacentHTML`, `document.write` and script URLs from strings throw. Build elements with
+`createElement` and `textContent`. Plugin scripts run with the full rights of the
 signed-in administrator in the browser.
 
 ## Migrations
@@ -222,5 +240,6 @@ name (`quotas_usage`), so they cannot collide with current or future core tables
 ## Limitations
 
 - An account has one administrator identity (with several passkeys); there are no roles or teams.
-- Rate limits are per key and server-wide; limits per account belong in a `beforeSend` hook.
+- Rate limits are in memory, per key, per account and server-wide (see the `RATE_LIMIT_*`
+  settings); monthly quotas and billing belong in a `beforeSend` hook.
 - The database is SQLite and delivery is synchronous; neither can be replaced by a plugin.

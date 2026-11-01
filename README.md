@@ -113,8 +113,9 @@ In plain terms, here is what an attacker on the internet runs into, from the out
 that every service needs its own key (256 random bits, stored only as a keyed hash, revocable
 individually), with rate limits and temporary blocks after failed attempts. A block only stops
 further failed attempts: a sender with a valid key is still served, so a neighbour behind the same
-router cannot silence your alerts. `0.0.0.0/0` (and any range wider than `/8` for IPv4 or `/7` for
-IPv6) is refused in every setting, so the API cannot be opened to everyone by mistake.
+router cannot silence your alerts. `0.0.0.0/0` (and any range wider than `/8` for IPv4, or `/16`
+for IPv6 outside the private `fc00::/7` and link-local `fe80::/10` blocks) is refused in every
+setting, so the API cannot be opened to everyone by mistake.
 
 **The web app is public, but useless without your passkey.**
 
@@ -140,7 +141,11 @@ IPv6) is refused in every setting, so the API cannot be opened to everyone by mi
   challenge works once and for 5 minutes.
 - *Abuse limits*: login and enrollment endpoints are rate limited per client inside the app
   (`RATE_LIMIT_ADMIN_ANONYMOUS_PER_MINUTE`, default 30) and in the nginx example; repeated failures
-  block the client temporarily.
+  block the client temporarily. A block never refuses a valid passkey, so someone behind the same
+  router cannot lock you out. Signed-in requests are limited per account
+  (`RATE_LIMIT_ADMIN_PER_ACCOUNT_PER_MINUTE`, default 120).
+- *Stolen session*: "Sign out other sessions" on the Passkeys card ends every session but your
+  current one (after a passkey confirmation).
 - *Browser hardening*: a strict Content Security Policy (only the app's own scripts can run),
   everything is shown as text and never as HTML, no third-party resources, and a `noindex` header
   keeps search engines away.
@@ -226,8 +231,9 @@ HTTPS (host reverse proxy) protects requests between your services/phone and pus
   nginx). See [deploy/](deploy/).
 - **Loopback publishing:** traffic to `127.0.0.1:2580` reaches the container from the network
   gateway, so **every process on the host** that can open that port can claim any client address
-  in `X-Forwarded-For`. The host is inside the trust boundary (see threat assumptions), and API
-  keys are still required.
+  in `X-Forwarded-For`. The same holds for connections from the host straight to the container's
+  address (`172.20.2.10:8080`), which also come from the gateway. The host is inside the trust
+  boundary (see threat assumptions), and API keys and passkeys are still required.
 - **Verify the client address:** "Your IP (as seen by server)" on the Health card must show your
   phone's real LAN address with "(via proxy)". If requests are refused and the logs show
   `172.20.2.1` or another internal address, the host proxy is not setting `X-Forwarded-For`.
@@ -286,7 +292,10 @@ and [deploy/Caddyfile.host](deploy/Caddyfile.host). Whatever proxy you use must:
 2. forward to `http://127.0.0.1:2580` and **overwrite** `X-Forwarded-For` with the TCP peer
    address (Caddy: `header_up X-Forwarded-For {remote_host}`; nginx:
    `proxy_set_header X-Forwarded-For $remote_addr;`), and drop `Forwarded`/`X-Real-IP`;
-3. not trust forwarding headers from its own clients.
+3. pass the original `Host` header on (Caddy does by default; nginx: `proxy_set_header Host $host;`).
+   pushgate answers `421` to requests for any other host name than the one in `PUBLIC_ORIGIN`
+   (protection against DNS rebinding);
+4. not trust forwarding headers from its own clients.
 
 pushgate accepts forwarded requests only from the Docker network gateway `172.20.2.1`
 (`TRUSTED_PROXIES`, set in `compose.yaml`), requires exactly one address in the header, and then
@@ -296,7 +305,10 @@ the header are refused.
 For a server that is *not* reachable from the internet (LAN only), use a certificate from ACME
 DNS-01 or your own CA; with a private CA, install its root on the iPhone (*Settings → General →
 VPN & Device Management*, then enable full trust in *Settings → General → About → Certificate
-Trust Settings*). This project's tests do not cover Web Push with a user-installed root.
+Trust Settings*). A trusted root can vouch for **any** website, not only pushgate, and whoever
+holds its key (for Caddy's `tls internal`: anyone who takes over the server) could then read the
+phone's TLS traffic; prefer ACME DNS-01 where possible. This project's tests do not cover Web Push
+with a user-installed root.
 
 `PUBLIC_ORIGIN` must exactly match the URL you open on the phone (scheme, host, and port if not
 443); passkeys are bound to that hostname.
@@ -417,7 +429,8 @@ docker compose ps
 ```
 
 Base images are pinned by digest; update tag + digest in `Dockerfile`/`compose.yaml` deliberately,
-then run `npm run test:container` and `npm run scan:image`.
+together with the matching `node-version` in `.github/workflows/ci.yml`, then run
+`npm run test:container` and `npm run scan:image`.
 
 **Graceful shutdown:** `docker compose stop` sends SIGTERM; pushgate stops accepting connections,
 lets in-flight deliveries finish (≤ 10 s) and closes the database.

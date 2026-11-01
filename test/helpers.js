@@ -92,7 +92,8 @@ export async function startApp({ env = {}, script, dir = tempDir(), secrets, plu
 export function request(port, { method = 'GET', path: p = '/', headers = {}, body, raw } = {}) {
   return new Promise((resolve, reject) => {
     const data = raw !== undefined ? raw : body !== undefined ? JSON.stringify(body) : undefined;
-    const h = { ...headers };
+    // Like a browser behind the proxy: the request names pushgate's public host.
+    const h = { Host: new URL(ORIGIN).host, ...headers };
     if (body !== undefined && !Object.keys(h).some((k) => k.toLowerCase() === 'content-type')) h['Content-Type'] = 'application/json';
     const req = http.request({ host: '127.0.0.1', port, method, path: p, headers: h }, (res) => {
       const chunks = [];

@@ -116,6 +116,22 @@ export const MIGRATIONS = [
   CREATE INDEX deliveries_account ON deliveries(account_id, created_at);
   CREATE INDEX audit_events_account ON audit_events(account_id, id);
   `,
+  // Recovery tokens that replace all other passkeys of the account. Rows of removed accounts
+  // that version 3 could leave behind are deleted. Events recorded before accounts existed
+  // whose origin was unknown (rejected networks, unknown keys, failed sign-ins) become
+  // unattributed again, like such events are recorded now.
+  `
+  ALTER TABLE enrollment_tokens ADD COLUMN replace_passkeys INTEGER NOT NULL DEFAULT 0;
+  DELETE FROM passkeys WHERE account_id NOT IN (SELECT id FROM accounts);
+  DELETE FROM enrollment_tokens WHERE account_id NOT IN (SELECT id FROM accounts);
+  DELETE FROM api_keys WHERE account_id NOT IN (SELECT id FROM accounts);
+  DELETE FROM devices WHERE account_id NOT IN (SELECT id FROM accounts);
+  DELETE FROM deliveries WHERE account_id NOT IN (SELECT id FROM accounts);
+  DELETE FROM audit_events WHERE account_id IS NOT NULL AND account_id NOT IN (SELECT id FROM accounts);
+  UPDATE audit_events SET account_id = NULL
+    WHERE (actor = 'anonymous' OR type = 'audit.suppressed')
+      AND ts < (SELECT applied_at FROM schema_migrations WHERE version = 3);
+  `,
 ];
 
 export function openDatabase(dataDir) {

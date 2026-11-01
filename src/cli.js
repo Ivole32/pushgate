@@ -23,7 +23,8 @@ Commands for keys, devices, passkeys and enrollment act on one account: --accoun
 Setup and recovery
   gen-secrets --out <dir>            Generate api_key_pepper and vapid_private_key (development use)
   check-config                       Validate configuration and secrets, then exit
-  enroll-token                       One-time token (15 min) to enroll an administrator passkey
+  enroll-token [--replace-passkeys]  One-time token (15 min) to enroll an administrator passkey;
+                                     --replace-passkeys removes the other passkeys when it is used
   sessions revoke-all                Sign out every admin session (only the account's with --account)
   passkeys list
   passkeys remove <passkey-id>       Also removes the last passkey (enroll a new one with a token)
@@ -74,12 +75,17 @@ function genSecrets(out) {
   }
 }
 
+// Values may come from web forms (names) and are written to the operator's terminal: control
+// and invisible characters are shown as escapes, never sent raw.
+const printable = (v) => String(v ?? '').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (c) => `\\u{${c.codePointAt(0).toString(16)}}`);
+
 function table(rows, columns) {
   if (rows.length === 0) return process.stdout.write('(none)\n');
-  const widths = columns.map((c) => Math.max(c.length, ...rows.map((r) => String(r[c] ?? '').length)));
-  const line = (vals) => vals.map((v, i) => String(v ?? '').padEnd(widths[i])).join('  ') + '\n';
+  const cells = rows.map((r) => columns.map((c) => printable(r[c])));
+  const widths = columns.map((c, i) => Math.max(c.length, ...cells.map((r) => r[i].length)));
+  const line = (vals) => vals.map((v, i) => v.padEnd(widths[i])).join('  ') + '\n';
   process.stdout.write(line(columns));
-  for (const r of rows) process.stdout.write(line(columns.map((c) => r[c])));
+  for (const r of cells) process.stdout.write(line(r));
 }
 
 const iso = (t) => (t ? new Date(t).toISOString() : '');
@@ -96,6 +102,7 @@ function main(argv) {
       'allow-high': { type: 'boolean' },
       'grace-hours': { type: 'string' },
       account: { type: 'string' },
+      'replace-passkeys': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -126,9 +133,11 @@ function main(argv) {
   try {
     if (!accounts.get(accountId)) fail('no account with that id (see "accounts list")');
     if (cmd === 'enroll-token') {
-      const { token, expiresAt } = auth.createEnrollmentToken(accountId);
-      audit.record('admin.enrollment_token_created', { accountId, actor });
-      process.stdout.write(`${token}\n\nValid until ${iso(expiresAt)} for one passkey enrollment.\n` +
+      const replacePasskeys = values['replace-passkeys'] === true;
+      const { token, expiresAt } = auth.createEnrollmentToken(accountId, { replacePasskeys });
+      audit.record('admin.enrollment_token_created', { accountId, actor, detail: { replace_passkeys: replacePasskeys } });
+      process.stdout.write(`${token}\n\nValid until ${iso(expiresAt)} for one passkey enrollment` +
+        (replacePasskeys ? '; enrolling removes every other passkey of the account.\n' : '.\n') +
         `Open ${config.publicOrigin}/ on the device, choose "Set up with enrollment token" and paste it.\n`);
     } else if (cmd === 'sessions' && sub === 'revoke-all') {
       const scoped = values.account !== undefined;
@@ -150,7 +159,7 @@ function main(argv) {
       if (problems.length) fail(problems.map((p) => `${p.field} ${p.issue}`).join('\n'));
       const account = accounts.create({ name: values.name });
       audit.record('account.created', { accountId: account.id, actor, detail: { name: account.name } });
-      process.stdout.write(`created account ${account.id} ("${account.name}"); enroll its administrator with: enroll-token --account ${account.id}\n`);
+      process.stdout.write(`created account ${account.id} ("${printable(account.name)}"); enroll its administrator with: enroll-token --account ${account.id}\n`);
     } else if (cmd === 'accounts' && sub === 'remove') {
       const r = arg ? accounts.remove(arg) : 'missing';
       if (r === 'default') fail('the default account cannot be removed');

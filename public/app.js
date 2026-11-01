@@ -134,17 +134,26 @@ function assertionJSON(cred) {
   };
 }
 
-async function createPasskey(optionsPath, optionsBody) {
+// `approve(options)` may look at the options first and return false to stop (returns null).
+async function createPasskey(optionsPath, optionsBody, approve = () => true) {
   const { challenge_id, options } = await api('POST', optionsPath, optionsBody);
+  if (!approve(options)) return null;
   const cred = await navigator.credentials.create({ publicKey: creationOptions(options) });
   return { challenge_id, response: registrationJSON(cred) };
 }
 
 // Creates the first (or a recovery) passkey of an account with a one-time token and signs in.
-async function enroll(token, name) {
-  const reg = await createPasskey('/admin/api/enroll/options', { token });
+// With `confirmAccount` (a token that came in a link, possibly from someone else) the account
+// is named and must be confirmed first, so nobody is signed up into a stranger's account.
+// Returns false when that was declined.
+async function enroll(token, name, { confirmAccount = false } = {}) {
+  const ask = (options) => !confirmAccount || session?.accounts !== 'multiple'
+    || confirm(`This link creates a passkey for the account "${options.user.name}". Continue only if this is your own account.`);
+  const reg = await createPasskey('/admin/api/enroll/options', { token }, ask);
+  if (!reg) return false;
   await api('POST', '/admin/api/enroll/verify', { token, name, ...reg });
   await boot();
+  return true;
 }
 
 // ---------- push subscription ----------
@@ -163,8 +172,17 @@ function pushSupport() {
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
+// The CSP requires Trusted Types for script URLs; this policy only ever produces the service
+// worker's URL.
+const scriptPolicy = window.trustedTypes?.createPolicy('pushgate', {
+  createScriptURL: (url) => {
+    if (url !== '/sw.js') throw new TypeError('unexpected script URL');
+    return url;
+  },
+});
+
 async function registration() {
-  return navigator.serviceWorker.register('/sw.js', { scope: '/' });
+  return navigator.serviceWorker.register(scriptPolicy ? scriptPolicy.createScriptURL('/sw.js') : '/sw.js', { scope: '/' });
 }
 
 async function refreshDeviceState(devices) {
@@ -358,7 +376,7 @@ async function loadAll() {
 const pluginApi = Object.freeze({
   api,
   flash,
-  enroll,
+  enroll: (token, name) => enroll(token, name),
   reload: () => boot(),
   session: () => (session ? structuredClone(session) : null),
   addSection({ view, title, onShow }) {
@@ -408,11 +426,13 @@ function show(view) {
 
 // A link to this app ending in #enroll=pge_... (e.g. from a sign-up email) fills in
 // the token. The fragment never reaches the server; it is removed from the address bar at once.
+let linkedToken = null;
 function takeEnrollmentLink() {
   const m = /^#enroll=(pge_[A-Za-z0-9_-]{43})$/.exec(location.hash);
   if (!m) return;
   history.replaceState(null, '', location.pathname);
   $('enroll-form').token.value = m[1];
+  linkedToken = m[1];
 }
 
 async function boot() {
@@ -464,7 +484,9 @@ $('reauth-btn').addEventListener('click', guarded(async () => {
 $('enroll-form').addEventListener('submit', guarded(async (event) => {
   event.preventDefault();
   const form = event.target;
-  await enroll(form.token.value.trim(), form.name.value.trim());
+  const token = form.token.value.trim();
+  if (!await enroll(token, form.name.value.trim(), { confirmAccount: token === linkedToken })) return;
+  linkedToken = null;
   form.reset();
   flash('Passkey created. You are signed in.');
 }));
@@ -508,6 +530,12 @@ $('paused').addEventListener('change', guarded(async (event) => {
   await loadOverview();
 }));
 $('more-events').addEventListener('click', guarded(() => loadEvents(true)));
+$('revoke-others').addEventListener('click', guarded(async () => {
+  if (!confirm('Sign out every other session of this account? This device stays signed in.')) return;
+  const r = await api('POST', '/admin/api/sessions/revoke-others', {});
+  flash(`Signed out ${r.revoked} other session(s).`);
+  await loadEvents();
+}));
 $('logout').addEventListener('click', guarded(async () => {
   await api('POST', '/admin/api/logout', {});
   csrf = null;

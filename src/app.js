@@ -4,7 +4,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createAccounts } from './accounts.js';
+import { UnknownAccountError, createAccounts } from './accounts.js';
 import { createApiKeys } from './apikeys.js';
 import { createAudit } from './audit.js';
 import { ConfigError } from './config.js';
@@ -24,13 +24,45 @@ import { createAdminRoutes } from './admin/routes.js';
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 export const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
+// A replaced limiter must answer like the built-in one: a number of seconds (0 = allowed). Any
+// other answer (a Promise from an async implementation, undefined, NaN) is a plugin bug; it is
+// logged and refused, never treated as "allowed".
+const REFUSE_SECONDS = 60;
+function seconds(value, log, what) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value === 0 ? 0 : Math.max(1, Math.ceil(value));
+  log.error('plugin service returned an invalid value; refusing', { service: what, type: typeof value });
+  return REFUSE_SECONDS;
+}
+
+function checkedRateLimiter(factory, log) {
+  return (perMinute) => {
+    const inner = factory(perMinute);
+    return { take: (id) => seconds(inner.take(id), log, 'rateLimiter.take') };
+  };
+}
+
+function checkedFailureLimiter(factory, log) {
+  return (opts) => {
+    const inner = factory(opts);
+    return {
+      blockedFor: (id) => seconds(inner.blockedFor(id), log, 'failureLimiter.blockedFor'),
+      fail: (id) => inner.fail(id) === true,
+      reset: (id) => inner.reset(id),
+    };
+  };
+}
+
 // `send` replaces the push transport like a plugin would (used by the tests). `multiAccount`
 // serves several accounts instead of only the default one (see src/accounts.js).
 export function createApp({ config, db, log, send, plugins = [], multiAccount = false }) {
   if (typeof multiAccount !== 'boolean') throw new ConfigError('multiAccount must be true or false');
   const ext = resolvePlugins(plugins);
   migratePlugins(db, ext.migrations);
-  const services = { rateLimiter: createRateLimiter, failureLimiter: createFailureLimiter, transport: send, ...ext.services };
+  const services = {
+    transport: ext.services.transport ?? send,
+    rateLimiter: ext.services.rateLimiter ? checkedRateLimiter(ext.services.rateLimiter, log) : createRateLimiter,
+    failureLimiter: ext.services.failureLimiter ? checkedFailureLimiter(ext.services.failureLimiter, log) : createFailureLimiter,
+  };
 
   // Who may reach the sending API before any key is looked at: TRUSTED_CIDRS, unless a plugin
   // replaces the check (it gets the default as `fallback`). Only an explicit `true` allows.
@@ -50,10 +82,13 @@ export function createApp({ config, db, log, send, plugins = [], multiAccount = 
   const failureWindow = { windowMs: 10 * 60000, blockMs: config.authBlockMinutes * 60000 };
   const limits = {
     perKey: services.rateLimiter(config.rateLimitPerKeyPerMinute),
+    perAccount: services.rateLimiter(config.rateLimitPerAccountPerMinute),
     global: services.rateLimiter(config.rateLimitGlobalPerMinute),
     apiFailures: services.failureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
     adminFailures: services.failureLimiter({ limit: config.authFailureLimit, ...failureWindow }),
     adminAnonymous: services.rateLimiter(config.rateLimitAdminAnonymousPerMinute),
+    adminSession: services.rateLimiter(config.rateLimitAdminPerAccountPerMinute),
+    pluginAnonymous: services.rateLimiter(config.rateLimitPluginAnonymousPerMinute),
   };
   const files = loadStatic(PUBLIC_DIR);
   // Plugin screens: each plugin's web directory is served under /plugins/<name>/, and the web
@@ -86,6 +121,14 @@ export function createApp({ config, db, log, send, plugins = [], multiAccount = 
   // PWA/admin zone: the configured admin networks, or everyone with the explicit ADMIN_PUBLIC opt-in.
   const adminAllowed = (ip) => config.adminPublic || ipInCidrs(ip, config.adminCidrs);
 
+  // Requests must name pushgate's own host (the port may differ behind a proxy). A page on
+  // another name that resolves to this server (DNS rebinding) is refused before any route.
+  function hostAllowed(header) {
+    if (typeof header !== 'string') return false;
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d{1,5})?$/.exec(header);
+    return m !== null && m[1].toLowerCase() === config.rpId;
+  }
+
   async function handleExtension(req, res, url, client, candidates) {
     const route = candidates.find((r) => r.method === req.method);
     if (!route) throw errors.methodNotAllowed();
@@ -93,6 +136,7 @@ export function createApp({ config, db, log, send, plugins = [], multiAccount = 
       auth: route.auth === 'none' ? false : undefined,
       fresh: route.auth === 'fresh',
       crossOrigin: route.crossOrigin,
+      anonymousLimit: 'plugin',
     });
     sendResult(res, await route.handler({ req, res, url, client, session, ctx }));
   }
@@ -115,6 +159,10 @@ export function createApp({ config, db, log, send, plugins = [], multiAccount = 
     }
 
     if (!client.ok) return reject(res, requestId, client, 'any', client.reason);
+    if (!hostAllowed(req.headers.host)) {
+      audit.recordThrottled('network.rejected', { ip: client.ip, detail: { zone: 'any', reason: 'host' } });
+      throw new HttpError(421, 'misdirected_request', 'This server does not serve that host name');
+    }
 
     // Sending API: only the configured sender networks.
     if (pathname.startsWith('/api/')) {
@@ -155,7 +203,9 @@ export function createApp({ config, db, log, send, plugins = [], multiAccount = 
       // lists) could see a different path than the router here.
       if (!url || req.url.length > 2048 || req.url.split('?')[0] !== url.pathname) throw errors.badRequest();
       await route(req, res, url, client, requestId);
-    } catch (err) {
+    } catch (caught) {
+      // Data for an account removed during the request: answered like a missing session.
+      const err = caught instanceof UnknownAccountError ? errors.unauthorized() : caught;
       if (err instanceof HttpError) {
         if (!res.headersSent) sendError(res, err, requestId);
       } else {

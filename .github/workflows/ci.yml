@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.1 # same as the pinned images (Dockerfile)
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run lint
@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.1 # same as the pinned images (Dockerfile)
       - run: npm ci --omit=dev --ignore-scripts # the CLI generates throw-away secrets for the test
       - name: Container end-to-end test (compose, restart, recreation)
         run: bash scripts/container-test.sh
@@ -53,7 +53,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.1 # same as the pinned images (Dockerfile)
       - run: npm ci --omit=dev --ignore-scripts
       - name: Enable Docker user-namespace remapping
         run: |

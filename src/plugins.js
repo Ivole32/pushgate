@@ -42,6 +42,9 @@ function checkRoute(plugin, route, seen) {
   if (typeof crossOrigin !== 'boolean') fail(plugin, `route ${path}: crossOrigin must be a boolean`);
   // Requests from other sites may never act with the administrator's session.
   if (crossOrigin && auth !== 'none') fail(plugin, `route ${path}: crossOrigin is only allowed with auth "none"`);
+  // Sessions belong to the admin zone (ADMIN_CIDRS): a public route must not accept one from
+  // networks where the web app itself is refused.
+  if (zone === 'public' && auth !== 'none') fail(plugin, `route ${path}: zone "public" is only allowed with auth "none"`);
   if (typeof handler !== 'function') fail(plugin, `route ${path}: handler must be a function`);
   const id = `${method} ${path}`;
   if (seen.has(id)) fail(plugin, `route ${id} is already defined by plugin "${seen.get(id)}"`);
@@ -57,13 +60,14 @@ export function resolvePlugins(plugins = []) {
     services: {},
     hooks: Object.fromEntries([...HOOKS].map((h) => [h, []])),
     routes: [],
-    features: {},
+    // No prototype: flags such as "constructor" are ordinary names.
+    features: Object.create(null),
     migrations: [],
     web: [],
   };
   const owners = {};
   const seenRoutes = new Map();
-  const featureOwners = {};
+  const featureOwners = new Map();
 
   for (const p of plugins) {
     if (!isObject(p) || typeof p.name !== 'string' || !NAME.test(p.name)) {
@@ -94,8 +98,8 @@ export function resolvePlugins(plugins = []) {
 
     if (p.features !== undefined && !isObject(p.features)) fail(name, 'features must be an object');
     for (const [flag, value] of Object.entries(p.features ?? {})) {
-      if (featureOwners[flag]) fail(name, `feature "${flag}" is already set by plugin "${featureOwners[flag]}"`);
-      featureOwners[flag] = name;
+      if (featureOwners.has(flag)) fail(name, `feature "${flag}" is already set by plugin "${featureOwners.get(flag)}"`);
+      featureOwners.set(flag, name);
       // Sent to the web app as JSON: only plain values survive the round trip.
       resolved.features[flag] = JSON.parse(JSON.stringify(value) ?? 'null');
     }

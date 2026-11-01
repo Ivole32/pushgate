@@ -64,7 +64,7 @@ test('plugin routes cannot hide web app files or mix zones on one path', () => {
     for (const [routes, message] of [
       [[route({ path: '/index.html' })], /is a web app file/],
       [[route({ path: '/sw.js' })], /is a web app file/],
-      [[route({ zone: 'public' }), route({ method: 'POST', zone: 'app' })], /need the same zone/],
+      [[route({ zone: 'public', auth: 'none' }), route({ method: 'POST', zone: 'app' })], /need the same zone/],
     ]) {
       assert.throws(() => createApp({ config, db, log, plugins: [plugin({ routes })] }), message);
     }
@@ -132,8 +132,9 @@ test('services can be replaced: rate limiters and the push transport', async () 
     plugins: [plugin({
       services: {
         rateLimiter: (perMinute) => {
-          limits.push(perMinute);
-          return { take: () => (perMinute === 30 ? 0 : 7) };
+          // The third limiter is the global one (see createApp).
+          const index = limits.push(perMinute) - 1;
+          return { take: () => (index === 2 ? 7 : 0) };
         },
         transport: async (subscription) => {
           pushed.push(subscription.endpoint);
@@ -142,7 +143,7 @@ test('services can be replaced: rate limiters and the push transport', async () 
       },
     })],
   });
-  assert.deepEqual(limits, [30, 120, 30], 'per key, global and anonymous admin limits are built with the plugin');
+  assert.deepEqual(limits, [30, 120, 120, 30, 120, 60], 'per key, account, global, anonymous admin, signed-in admin and anonymous plugin limits are built with the plugin');
   addDevice(t);
   const { key } = t.ctx.keys.create('default', { name: 'svc' });
   const r = await notify(t, key);

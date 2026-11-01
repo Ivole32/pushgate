@@ -23,7 +23,11 @@ WORK="$(mktemp -d)"
 command -v cygpath >/dev/null && WORK="$(cygpath -m "$WORK")" # Windows: a path node and docker both understand
 export PUSHGATE_ENV_FILE="$WORK/env"
 export SECRETS_DIR="$WORK/secrets"
-BASE="http://127.0.0.1:$PUSHGATE_PORT"
+# Requests name the public host, as through the host proxy (which passes Host on); curl
+# resolves it to the loopback port.
+PUBLIC_HOST=notify.ctest.example
+BASE="http://$PUBLIC_HOST:$PUSHGATE_PORT"
+curl() { command curl --resolve "$PUBLIC_HOST:$PUSHGATE_PORT:127.0.0.1" "$@"; }
 LAN_CLIENT=192.168.50.20   # stands in for a LAN client, as the host proxy would report it
 
 cleanup() {
@@ -40,7 +44,7 @@ node src/cli.js gen-secrets --out "$SECRETS_DIR" >/dev/null
 bash scripts/gen-secrets.sh --fix-permissions "$SECRETS_DIR" >/dev/null
 
 cat > "$PUSHGATE_ENV_FILE" <<EOF
-PUBLIC_ORIGIN=https://notify.ctest.example
+PUBLIC_ORIGIN=https://$PUBLIC_HOST
 TRUSTED_CIDRS=192.168.50.0/24
 ADMIN_PUBLIC=true
 VAPID_SUBJECT=mailto:ci@example.invalid
@@ -116,7 +120,9 @@ get() { curl -s -o "$WORK/response" -w '%{http_code}' -H "X-Forwarded-For: $2" "
 [ "$(get /admin/api/keys 203.0.113.9)" = "401" ] || fail "admin API reachable without a session"
 [ "$(send "$KEY" 203.0.113.9)" = "403" ] || fail "sending API reachable from a public address"
 grep -q 'X-Robots-Tag' <(curl -sI -H "X-Forwarded-For: 203.0.113.9" "$BASE/") || fail "noindex header missing"
-pass "default public web app: reachable from anywhere, admin needs passkey, sending stays restricted"
+OTHER_HOST=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: 203.0.113.9" "http://127.0.0.1:$PUSHGATE_PORT/" || true) # curl exits non-zero after a 421
+[ "$OTHER_HOST" = "421" ] || fail "request for another host name returned $OTHER_HOST"
+pass "default public web app: reachable from anywhere, admin needs passkey, sending stays restricted; other host names 421"
 
 # Other clients on the Docker network (here: the container itself) are not trusted proxies.
 DIRECT=$(docker compose exec -T pushgate /nodejs/bin/node -e "

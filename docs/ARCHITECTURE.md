@@ -27,10 +27,14 @@ Data flow for one notification:
 3. API key parse (format check), lookup by public key id, HMAC comparison in constant time,
    revocation/expiry/scope check. Invalid keys count toward a per-client block; a blocked client's
    further failures get 429, but a valid key is always served.
-4. Per-key and global rate limits.
-5. Only now is the body read (8 KiB cap), parsed and validated against a strict schema.
+4. Per-key rate limit, then the kill switches and the account's pause switch.
+5. Only now is the body read (8 KiB cap), parsed and validated against a strict schema. Then the
+   per-account and global rate limits: paused accounts and invalid requests use none of the
+   budget shared with other accounts.
 6. The payload (≤ 3 KiB of JSON) is encrypted per device by the `web-push` library (aes128gcm,
-   RFC 8291) and signed with VAPID (RFC 8292), then POSTed to each subscription endpoint.
+   RFC 8291) and signed with VAPID (RFC 8292), then POSTed to each subscription endpoint, whose
+   host is checked against the allowlist again. Each attempt has a 10 s deadline and reads at
+   most 64 KiB of the push service's answer.
 7. 404/410 responses delete the subscription; 429/5xx/network errors are retried at most twice.
 8. A delivery record **without title or message** is stored for `HISTORY_RETENTION_DAYS` (default 7).
 
@@ -111,28 +115,37 @@ see [PLUGINS.md](PLUGINS.md#accounts) for serving several accounts.
 6. **Admin sessions**: `__Host-` cookie, `Secure; HttpOnly; SameSite=Strict`, 30 min idle / 12 h
    absolute, token hashed at rest. State-changing requests need a per-session CSRF header *and* a
    matching `Origin`.
-   WebAuthn challenges are stateless tokens `base64url({kind, challenge, expiry}).HMAC` (random
+   WebAuthn challenges are stateless tokens `base64url({kind, account, session, challenge, expiry}).HMAC` (random
    key per process, so a restart invalidates all outstanding challenges): the server stores nothing per issued challenge, so anonymous floods
    cannot exhaust a table and block the administrator. A challenge is bound to its ceremony kind,
    expires after 5 minutes and is single use (recorded only after a successful verification, with
    no `await` between check and insert). Forged/stale challenges do not count toward the
-   brute-force block; unauthenticated admin endpoints have an in-app per-client rate limit.
+   brute-force block, and the block never refuses a valid passkey; unauthenticated admin
+   endpoints have an in-app per-client rate limit, signed-in ones a per-account limit.
+   Re-confirmation challenges are bound to the session that requested them.
    Sessions record when their holder last completed a passkey ceremony (`verified_at`); adding or
    removing passkeys, creating or rotating API keys and registering devices require that to be
    under 5 minutes old (`reauth` ceremony otherwise). Security-relevant changes are pushed to all
-   devices; a recovery enrollment deletes all sessions. Stored credential ids must match the API's
+   devices; a recovery enrollment deletes all sessions and spends the account's other enrollment
+   tokens (optionally also its other passkeys). "Sign out other sessions" ends every session of
+   the account but the current one. Stored credential ids must match the API's
    id pattern and transports are filtered to known values, so a planted passkey stays removable.
 7. **Brute-force counters** are keyed per IPv4 address or IPv6 /64, are not reset by a
    successful request, and active blocks are kept in the in-memory table up to twice its normal
    size. A block refuses only failed attempts: valid keys from a blocked address are still served.
-   Persisted rejection events are throttled per client (/64) and in total (60 rows per minute;
-   the rest are logged and summarised as `audit.suppressed`).
+   Persisted rejection events are throttled per client (/64) and per account (60 rows per minute
+   per account and for the unattributed ones; the rest are logged and summarised as
+   `audit.suppressed`). The in-memory limiters use a monotonic clock.
 8. **Service keys cannot administer anything.** The admin API accepts only passkey sessions; API keys
    are accepted only by `/api/v1/notifications`.
 9. **Subscription endpoint allowlist** (Apple, Google, Mozilla, Microsoft push hosts by default) so a
-   registered "device" cannot turn the server into an SSRF proxy.
+   registered "device" cannot turn the server into an SSRF proxy. Hosts must be plain DNS names
+   (URL parsers disagree on others), the check is repeated before every delivery, and the request
+   is made by pushgate itself to the host that was checked. Endpoints with a fragment or an empty
+   query are refused, so one subscription has one spelling.
 10. **Content is data, never markup.** The service worker passes title/body as plain strings to
-   `showNotification`; the admin UI uses only `textContent`; CSP forbids inline script.
+   `showNotification`; the admin UI uses only `textContent`; CSP forbids inline script and enforces
+   Trusted Types. Requests must name the host of `PUBLIC_ORIGIN` (421 otherwise; DNS rebinding).
    Notification click always opens the app's own start page — requests cannot supply URLs or actions.
    The title is prefixed with the sending key's name, and tags are scoped per service (rotation
    lineage) and HMAC'd with the pepper, so services cannot impersonate or replace each other.

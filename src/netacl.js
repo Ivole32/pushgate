@@ -21,18 +21,25 @@ function ipv6ToBigInt(ip) {
   return parts.reduce((acc, part) => (acc << 16n) | BigInt(parseInt(part, 16)), 0n);
 }
 
+const isMapped = (n) => n >> 32n === 0xffffn;
+const mappedToIpv4 = (n) => [24n, 16n, 8n, 0n].map((s) => String((n >> s) & 0xffn)).join('.');
+
 // Returns a canonical address string, or null if the input is not a plain IP address.
-// IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) are converted to IPv4 so that one rule
-// covers both socket representations. Zone ids (fe80::1%eth0) are rejected.
+// IPv4-mapped IPv6 addresses (::ffff:a.b.c.d, in any spelling) are converted to IPv4 so that
+// one rule covers both socket representations. Zone ids (fe80::1%eth0) are rejected.
 export function normalizeIp(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 64) return null;
-  const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  const candidate = mapped ? mapped[1] : value;
-  const family = net.isIP(candidate);
-  if (family === 4) return candidate;
-  if (family === 6 && !candidate.includes('%')) return candidate.toLowerCase();
-  return null;
+  const family = net.isIP(value);
+  if (family === 4) return value;
+  if (family !== 6 || value.includes('%')) return null;
+  const n = ipv6ToBigInt(value);
+  return isMapped(n) ? mappedToIpv4(n) : value.toLowerCase();
 }
+
+// Wide IPv6 ranges (shorter than /16) are accepted only inside the private and link-local
+// blocks, so fc00::/7 stays possible but a typo cannot trust a large part of the internet.
+const IPV6_LOCAL = [{ network: ipv6ToBigInt('fc00::'), prefix: 7 }, { network: ipv6ToBigInt('fe80::'), prefix: 10 }];
+const inIpv6Block = (value, { network, prefix }) => value >> BigInt(128 - prefix) === network >> BigInt(128 - prefix);
 
 export function parseCidr(text) {
   const raw = String(text).trim();
@@ -52,8 +59,11 @@ export function parseCidr(text) {
   // widest private ranges: 10.0.0.0/8 and fc00::/7.
   const minPrefix = family === 4 ? 8 : 7;
   if (prefix < minPrefix) throw new Error(`refusing CIDR "${raw}": prefixes shorter than /${minPrefix} cover too much of the internet`);
-  if (family === 6 && /^::ffff:/i.test(addr)) throw new Error(`invalid CIDR "${raw}": use the IPv4 form instead of IPv4-mapped IPv6`);
   const value = family === 4 ? ipv4ToBigInt(addr) : ipv6ToBigInt(addr);
+  if (family === 6 && isMapped(value)) throw new Error(`invalid CIDR "${raw}": use the IPv4 form instead of IPv4-mapped IPv6`);
+  if (family === 6 && prefix < 16 && !IPV6_LOCAL.some((b) => prefix >= b.prefix && inIpv6Block(value, b))) {
+    throw new Error(`refusing CIDR "${raw}": IPv6 prefixes shorter than /16 are only allowed within fc00::/7 and fe80::/10`);
+  }
   const mask = ((1n << BigInt(prefix)) - 1n) << BigInt(bits - prefix);
   if ((value & ~mask & ((1n << BigInt(bits)) - 1n)) !== 0n) {
     throw new Error(`invalid CIDR "${raw}": host bits set (did you mean the network address?)`);

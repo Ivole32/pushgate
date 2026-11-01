@@ -56,6 +56,7 @@ test('existing data moves into the default account when upgrading', () => {
     INSERT INTO passkeys (id, public_key, name, created_at) VALUES ('pk1', x'00', 'phone', 1);
     INSERT INTO devices (id, name, endpoint, p256dh, auth, created_at) VALUES ('d1', 'phone', 'https://web.push.apple.com/x', 'p', 'a', 1);
     INSERT INTO audit_events (ts, type, actor) VALUES (1, 'network.rejected', 'anonymous');
+    INSERT INTO audit_events (ts, type, actor) VALUES (2, 'api_key.created', 'admin');
   `);
   old.close();
 
@@ -63,9 +64,12 @@ test('existing data moves into the default account when upgrading', () => {
   try {
     assert.deepEqual({ ...db.prepare('SELECT id, webauthn_user_id, sending_paused FROM accounts').get() },
       { id: 'default', webauthn_user_id: 'handle123', sending_paused: 1 });
-    for (const table of ['api_keys', 'passkeys', 'devices', 'audit_events']) {
+    for (const table of ['api_keys', 'passkeys', 'devices']) {
       assert.equal(db.prepare(`SELECT account_id FROM ${table}`).get().account_id, 'default', table);
     }
+    // Events of unknown origin stay unattributed, like they are recorded now.
+    assert.deepEqual(db.prepare('SELECT type, account_id FROM audit_events ORDER BY ts').all().map((r) => ({ ...r })),
+      [{ type: 'network.rejected', account_id: null }, { type: 'api_key.created', account_id: 'default' }]);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM settings').get().n, 0, 'moved settings are removed');
   } finally {
     db.close();

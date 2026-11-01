@@ -5,11 +5,15 @@
 # forwarding headers must never be trusted. Without it, {remote_host} is the TCP peer.
 
 notify.home.example {
-	# Pick one TLS option:
-	#   tls internal                                   Caddy's own CA (install its root on the iPhone)
+	# TLS: by default Caddy gets a Let's Encrypt certificate (the name must be reachable from the
+	# internet on port 80/443). Alternatives:
+	#   tls { dns <provider> ... }                      ACME DNS-01 (Caddy build with the DNS plugin),
+	#                                                   for a server reachable only from the LAN
 	#   tls /etc/ssl/pushgate/fullchain.pem /etc/ssl/pushgate/key.pem
-	#   tls { dns <provider> ... }                      ACME DNS-01 (Caddy build with the DNS plugin)
-	tls internal
+	#   tls internal                                    Caddy's own CA. Its root must be trusted on the
+	#                                                   iPhone, and a trusted root can vouch for ANY site:
+	#                                                   whoever takes over this server could then read
+	#                                                   the phone's TLS traffic. Avoid it if you can.
 
 	# Optional: restrict who can reach this site at all (pushgate enforces its own CIDRs too).
 	# @outside not remote_ip 192.168.1.0/24

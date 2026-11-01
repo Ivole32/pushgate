@@ -11,10 +11,15 @@ const TYPES = {
   '.png': 'image/png',
 };
 
+// Hidden files and directories, installed packages and symbolic links are never published: a
+// plugin's web directory may sit inside its package next to server code and configuration.
+const SKIP = (entry) => entry.name.startsWith('.') || entry.name === 'node_modules' || entry.isSymbolicLink();
+
 export function loadStatic(dir) {
   const files = new Map();
   const walk = (sub) => {
     for (const entry of fs.readdirSync(path.join(dir, sub), { withFileTypes: true })) {
+      if (SKIP(entry)) continue;
       const rel = sub ? `${sub}/${entry.name}` : entry.name;
       if (entry.isDirectory()) walk(rel);
       else if (TYPES[path.extname(entry.name)]) {

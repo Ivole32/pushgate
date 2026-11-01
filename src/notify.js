@@ -29,7 +29,14 @@ export function createNotifyHandler({ config, log, accounts, keys, auth, pusher,
         throw errors.rateLimited(blocked);
       }
       const nowBlocked = limits.apiFailures.fail(who);
-      audit.recordThrottled('auth.failed', { ip, detail: { reason: result.reason, key_id: result.keyId, blocked: nowBlocked } });
+      // A revoked or expired key (the full secret matched) is shown to its account: someone
+      // still uses it.
+      audit.recordThrottled('auth.failed', {
+        accountId: result.accountId ?? null,
+        ...(result.accountId ? { actor: `key:${result.keyId}` } : {}),
+        ip,
+        detail: { reason: result.reason, key_id: result.keyId, blocked: nowBlocked },
+      });
       throw errors.unauthorized();
     }
     const key = result.key;
@@ -44,16 +51,11 @@ export function createNotifyHandler({ config, log, accounts, keys, auth, pusher,
     // Failures are deliberately not reset on success: holding one valid key must not allow
     // unlimited guessing of other keys from the same host.
 
-    // 3. Rate limits: per key first, then global.
+    // 3. Per-key rate limit.
     const waitKey = limits.perKey.take(key.id);
     if (waitKey) {
       audit.recordThrottled('rate_limited', { accountId, actor: `key:${key.id}`, ip, detail: { limit: 'key' } });
       throw errors.rateLimited(waitKey);
-    }
-    const waitGlobal = limits.global.take('global');
-    if (waitGlobal) {
-      audit.recordThrottled('rate_limited', { accountId, actor: `key:${key.id}`, ip, detail: { limit: 'global' } });
-      throw errors.rateLimited(waitGlobal);
     }
 
     // 4. Kill switches.
@@ -70,10 +72,22 @@ export function createNotifyHandler({ config, log, accounts, keys, auth, pusher,
       throw new HttpError(403, 'insufficient_scope', 'This key may not send high priority notifications');
     }
     const ttl = body.ttl ?? DEFAULT_TTL;
-
-    // 6. Plugin checks (e.g. quotas). They may only refuse: an HttpError is the response, any
-    // other error a 500. Either way nothing is sent. Hooks never see title or message.
+    // The account may have been removed while the body was read.
     const account = accounts.get(accountId);
+    if (!account) throw errors.unauthorized();
+
+    // 6. Account and global rate limits, taken only for notifications that will be sent: paused
+    // accounts and invalid requests do not use up the budget shared with other accounts.
+    for (const [limit, bucket, id] of [['account', limits.perAccount, accountId], ['global', limits.global, 'global']]) {
+      const wait = bucket.take(id);
+      if (wait) {
+        audit.recordThrottled('rate_limited', { accountId, actor: `key:${key.id}`, ip, detail: { limit } });
+        throw errors.rateLimited(wait);
+      }
+    }
+
+    // 7. Plugin checks (e.g. quotas). They may only refuse: an HttpError is the response, any
+    // other error a 500. Either way nothing is sent. Hooks never see title or message.
     for (const { fn } of hooks.beforeSend) await fn({ account, key, client, notification: { priority, ttl } });
 
     const outcome = await pusher.deliver({
@@ -90,7 +104,7 @@ export function createNotifyHandler({ config, log, accounts, keys, auth, pusher,
     if (outcome.error === 'payload_too_large') {
       throw new HttpError(413, 'payload_too_large', 'Notification exceeds the Web Push payload limit; shorten title or message');
     }
-    // 7. Plugin follow-ups (e.g. metering). The notification is out already, so a failing hook
+    // 8. Plugin follow-ups (e.g. metering). The notification is out already, so a failing hook
     // is logged and does not change the response (an error would make the sender send again).
     for (const { plugin, fn } of hooks.afterDelivery) {
       try {

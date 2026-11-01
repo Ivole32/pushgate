@@ -11,6 +11,10 @@ export const CSP = [
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
+  // DOM sinks that turn strings into HTML or script are refused; the web app creates its one
+  // script URL (the service worker) through the "pushgate" policy.
+  "require-trusted-types-for 'script'",
+  'trusted-types pushgate',
 ].join('; ');
 
 export function setSecurityHeaders(res, { hsts }) {
@@ -59,11 +63,20 @@ export function sendJson(res, status, body, headers = {}) {
 }
 
 // Route handler results: a value is sent as 200 JSON, `{ status, body }` with that status.
+// Only an object with exactly these keys (`body` optional) and an HTTP status 200-599 counts as
+// such an envelope; any other value, e.g. a database row with a `status` column, is the body.
 // Handlers that wrote the response themselves return nothing after doing so.
 export function sendResult(res, result) {
   if (res.headersSent || res.writableEnded) return;
-  if (result && typeof result.status === 'number' && result.body) sendJson(res, result.status, result.body);
-  else sendJson(res, 200, result);
+  const envelope = result !== null && typeof result === 'object' && !Array.isArray(result)
+    && Number.isInteger(result.status) && result.status >= 200 && result.status <= 599
+    && Object.keys(result).every((k) => k === 'status' || k === 'body');
+  if (!envelope) return sendJson(res, 200, result);
+  if (result.status === 204 || result.body === undefined) {
+    res.writeHead(result.status, { 'Cache-Control': 'no-store', 'Content-Length': 0 });
+    return res.end();
+  }
+  sendJson(res, result.status, result.body);
 }
 
 export function sendError(res, err, requestId) {

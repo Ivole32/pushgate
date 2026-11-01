@@ -144,8 +144,15 @@ export function loadConfig(env = process.env, { readSecrets = true } = {}) {
     pushHosts,
     rateLimitPerKeyPerMinute: int(env, 'RATE_LIMIT_PER_KEY_PER_MINUTE', 30, 1, 10000, errors),
     rateLimitGlobalPerMinute: int(env, 'RATE_LIMIT_GLOBAL_PER_MINUTE', 120, 1, 100000, errors),
+    // Notifications per account per minute (all its keys together), so that with several
+    // accounts one cannot use up the global limit of the others.
+    rateLimitPerAccountPerMinute: int(env, 'RATE_LIMIT_PER_ACCOUNT_PER_MINUTE', 120, 1, 100000, errors),
     // Unauthenticated admin endpoints (session check, login, enrollment), per client per minute.
     rateLimitAdminAnonymousPerMinute: int(env, 'RATE_LIMIT_ADMIN_ANONYMOUS_PER_MINUTE', 30, 1, 10000, errors),
+    // Signed-in admin API requests, per account per minute.
+    rateLimitAdminPerAccountPerMinute: int(env, 'RATE_LIMIT_ADMIN_PER_ACCOUNT_PER_MINUTE', 120, 1, 10000, errors),
+    // Plugin routes without a session (sign-up, webhooks), per client per minute.
+    rateLimitPluginAnonymousPerMinute: int(env, 'RATE_LIMIT_PLUGIN_ANONYMOUS_PER_MINUTE', 60, 1, 100000, errors),
     authFailureLimit: int(env, 'AUTH_FAILURE_LIMIT', 10, 1, 1000, errors),
     authBlockMinutes: int(env, 'AUTH_BLOCK_MINUTES', 15, 1, 1440, errors),
     historyRetentionDays: int(env, 'HISTORY_RETENTION_DAYS', 7, 0, 365, errors),
@@ -153,6 +160,9 @@ export function loadConfig(env = process.env, { readSecrets = true } = {}) {
     sessionIdleMinutes: int(env, 'SESSION_IDLE_MINUTES', 30, 5, 1440, errors),
     sessionMaxHours: int(env, 'SESSION_MAX_HOURS', 12, 1, 168, errors),
     maxDevices: int(env, 'MAX_DEVICES', 20, 1, 200, errors),
+    // Per account: active API keys created in the web app, and passkeys.
+    maxApiKeys: int(env, 'MAX_API_KEYS', 100, 1, 10000, errors),
+    maxPasskeys: int(env, 'MAX_PASSKEYS', 20, 1, 200, errors),
     logLevel,
     pepperFile: env.API_KEY_PEPPER_FILE || '/run/secrets/api_key_pepper',
     vapidKeyFile: env.VAPID_PRIVATE_KEY_FILE || '/run/secrets/vapid_private_key',

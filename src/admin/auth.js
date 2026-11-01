@@ -63,13 +63,16 @@ export function createAdminAuth({ db, config, accounts, now = () => Date.now() }
 
   // ---- enrollment tokens -------------------------------------------------------------
 
-  function createEnrollmentToken(accountId, { ttlMs = ENROLLMENT_TOKEN_TTL_MS } = {}) {
+  // `replacePasskeys`: enrolling with this token removes every other passkey of the account
+  // (recovery after a passkey was lost or may be in someone else's hands).
+  function createEnrollmentToken(accountId, { ttlMs = ENROLLMENT_TOKEN_TTL_MS, replacePasskeys = false } = {}) {
     if (!accounts.get(checkAccountId(accountId))) throw new TypeError('unknown account');
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 60000 || ttlMs > ENROLLMENT_TOKEN_MAX_TTL_MS) throw new TypeError('invalid token lifetime');
+    if (typeof replacePasskeys !== 'boolean') throw new TypeError('replacePasskeys must be true or false');
     const token = 'pge_' + crypto.randomBytes(32).toString('base64url');
     const t = now();
-    db.prepare('INSERT INTO enrollment_tokens (token_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
-      .run(sha256(token), accountId, t, t + ttlMs);
+    db.prepare('INSERT INTO enrollment_tokens (token_hash, account_id, created_at, expires_at, replace_passkeys) VALUES (?, ?, ?, ?, ?)')
+      .run(sha256(token), accountId, t, t + ttlMs, replacePasskeys ? 1 : 0);
     return { token, expiresAt: t + ttlMs };
   }
 
@@ -84,17 +87,21 @@ export function createAdminAuth({ db, config, accounts, now = () => Date.now() }
 
   const mac = (payload) => crypto.createHmac('sha256', challengeKey).update(payload).digest('base64url');
 
-  // Token = base64url(JSON {k: kind, a: account, c: challenge, e: expiry}) "." HMAC. Binding the
-  // kind stops a login challenge from being used for enrollment and vice versa; binding the
-  // account (registration only) stops options issued for one account being completed in another.
-  function issueChallenge(kind, challenge, accountId = null) {
-    const payload = Buffer.from(JSON.stringify({ k: kind, a: accountId, c: challenge, e: now() + CHALLENGE_TTL_MS })).toString('base64url');
+  // Token = base64url(JSON {k: kind, a: account, s: session, c: challenge, e: expiry}) "." HMAC.
+  // Binding the kind stops a login challenge from being used for enrollment and vice versa;
+  // binding the account (registration) stops options issued for one account being completed in
+  // another; binding the session (re-confirmation) makes a confirmation count only for the
+  // session that asked for it.
+  const sessionTag = (hash) => (hash ? sha256(`reauth\0${hash}`).slice(0, 22) : null);
+
+  function issueChallenge(kind, challenge, accountId = null, sessionHash = null) {
+    const payload = Buffer.from(JSON.stringify({ k: kind, a: accountId, s: sessionTag(sessionHash), c: challenge, e: now() + CHALLENGE_TTL_MS })).toString('base64url');
     return `${payload}.${mac(payload)}`;
   }
 
-  // Returns the challenge string, or null if the token is forged, expired, of another kind or
-  // account, or already used.
-  function openChallenge(token, kind, accountId = null) {
+  // Returns the challenge string, or null if the token is forged, expired, of another kind,
+  // account or session, or already used.
+  function openChallenge(token, kind, accountId = null, sessionHash = null) {
     if (typeof token !== 'string' || !CHALLENGE_TOKEN_PATTERN.test(token)) return null;
     const [payload, tag] = token.split('.');
     const expected = Buffer.from(mac(payload));
@@ -106,7 +113,7 @@ export function createAdminAuth({ db, config, accounts, now = () => Date.now() }
     } catch {
       return null;
     }
-    if (data?.k !== kind || (data.a ?? null) !== accountId || typeof data.c !== 'string' || !Number.isSafeInteger(data.e) || data.e <= now()) return null;
+    if (data?.k !== kind || (data.a ?? null) !== accountId || (data.s ?? null) !== sessionTag(sessionHash) || typeof data.c !== 'string' || !Number.isSafeInteger(data.e) || data.e <= now()) return null;
     if (usedChallenges.has(data.c)) return null;
     return { challenge: data.c, expires: data.e };
   }
@@ -173,14 +180,25 @@ export function createAdminAuth({ db, config, accounts, now = () => Date.now() }
     return transaction(db, () => {
       // Checked first: a refused enrollment must neither spend the token nor sign anyone out.
       if (db.prepare('SELECT 1 FROM passkeys WHERE id = ?').get(cred.id)) return { error: 'invalid' };
+      // The account may have been removed while the response was on its way.
+      if (!accounts.get(accountId)) return { error: 'invalid' };
+      if (kind === 'add' && db.prepare('SELECT COUNT(*) AS n FROM passkeys WHERE account_id = ?').get(accountId).n >= config.maxPasskeys) {
+        return { error: 'limit' };
+      }
       if (kind === 'enroll') {
         // Consume the token atomically with storing the passkey.
-        const res = db.prepare('UPDATE enrollment_tokens SET used_at = ? WHERE token_hash = ? AND account_id = ? AND used_at IS NULL AND expires_at > ?')
-          .run(now(), sha256(token), accountId, now());
-        if (res.changes !== 1) return { error: 'invalid' };
+        const row = db.prepare('SELECT replace_passkeys FROM enrollment_tokens WHERE token_hash = ? AND account_id = ? AND used_at IS NULL AND expires_at > ?')
+          .get(sha256(token), accountId, now());
+        if (!row) return { error: 'invalid' };
+        // Every other open token of the account is spent too: an older sign-up or recovery link
+        // must not work after someone has enrolled.
+        db.prepare('UPDATE enrollment_tokens SET used_at = ? WHERE account_id = ? AND used_at IS NULL').run(now(), accountId);
         // Recovery: whoever held a session of this account before (possibly the reason for
         // recovering) is signed out. The caller starts a new session for the enrolling device.
         db.prepare('DELETE FROM sessions WHERE passkey_id IN (SELECT id FROM passkeys WHERE account_id = ?)').run(accountId);
+        // A replacing token also removes the other passkeys, so a passkey someone else added
+        // cannot be used to sign in again.
+        if (row.replace_passkeys === 1) db.prepare('DELETE FROM passkeys WHERE account_id = ?').run(accountId);
       }
       db.prepare('INSERT INTO passkeys (id, account_id, public_key, counter, transports, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(cred.id, accountId, Buffer.from(cred.publicKey), cred.counter, JSON.stringify(cleanTransports(cred.transports)), name, now());
@@ -190,17 +208,20 @@ export function createAdminAuth({ db, config, accounts, now = () => Date.now() }
 
   // ---- authentication -------------------------------------------------------------------
 
-  // kind 'login' starts a session; kind 'reauth' re-confirms the holder of an existing one.
-  async function authenticationOptions(kind = 'login') {
+  // kind 'login' starts a session; kind 'reauth' re-confirms the holder of an existing one,
+  // identified by `sessionHash`.
+  async function authenticationOptions(kind = 'login', sessionHash = null) {
     const options = await generateAuthenticationOptions({ rpID, userVerification: 'required', allowCredentials: [] });
-    return { challengeId: issueChallenge(kind, options.challenge), options };
+    return { challengeId: issueChallenge(kind, options.challenge, null, sessionHash), options };
   }
 
   // Returns { id, accountId } or an error like verifyRegistration. The passkey decides the account.
-  async function verifyAuthentication({ challengeId, response, kind = 'login' }) {
-    const c = openChallenge(challengeId, kind);
+  async function verifyAuthentication({ challengeId, response, kind = 'login', sessionHash = null }) {
+    const c = openChallenge(challengeId, kind, null, sessionHash);
     if (!c) return { error: 'challenge' };
-    const row = typeof response.id === 'string' ? db.prepare('SELECT * FROM passkeys WHERE id = ?').get(response.id) : null;
+    const row = typeof response.id === 'string'
+      ? db.prepare('SELECT p.* FROM passkeys p JOIN accounts a ON a.id = p.account_id WHERE p.id = ?').get(response.id)
+      : null;
     if (!row) return { error: 'invalid' };
     let result;
     try {
@@ -264,7 +285,7 @@ export function createAdminAuth({ db, config, accounts, now = () => Date.now() }
     if (typeof token !== 'string' || !SESSION_PATTERN.test(token)) return null;
     const hash = sha256(token);
     const row = db.prepare(`SELECT s.*, p.account_id FROM sessions s JOIN passkeys p ON p.id = s.passkey_id
-                            WHERE s.token_hash = ?`).get(hash);
+                            JOIN accounts a ON a.id = p.account_id WHERE s.token_hash = ?`).get(hash);
     if (!row) return null;
     const t = now();
     if (row.expires_at <= t || row.last_seen_at + config.sessionIdleMinutes * 60000 <= t) {
@@ -279,11 +300,12 @@ export function createAdminAuth({ db, config, accounts, now = () => Date.now() }
     db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hash);
   }
 
-  // All sessions of one account, or of every account when no account is given (CLI).
-  function revokeAllSessions(accountId = null) {
+  // All sessions of one account, or of every account when no account is given (CLI). `except`
+  // keeps one session (the caller's own, for "sign out everywhere else").
+  function revokeAllSessions(accountId = null, { except = null } = {}) {
     if (accountId === null) return db.prepare('DELETE FROM sessions').run().changes;
-    return db.prepare('DELETE FROM sessions WHERE passkey_id IN (SELECT id FROM passkeys WHERE account_id = ?)')
-      .run(checkAccountId(accountId)).changes;
+    return db.prepare('DELETE FROM sessions WHERE passkey_id IN (SELECT id FROM passkeys WHERE account_id = ?) AND token_hash IS NOT ?')
+      .run(checkAccountId(accountId), except).changes;
   }
 
   return {

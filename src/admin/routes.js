@@ -15,6 +15,8 @@ import { PASSKEY_ID, SESSION_COOKIE, readCookie, sessionCookie } from './auth.js
 
 const ADMIN_BODY_LIMIT = 16384;
 const DEVICE_ID = /^[A-Za-z0-9_-]{22}$/;
+// The database integrity check reads the whole file; its result is reused for this long.
+const HEALTH_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
 function safeEqual(a, b) {
   const x = Buffer.from(String(a));
@@ -34,8 +36,8 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
 
   // Administrators of hosted accounts have no shell on the server.
   const notYou = multiAccount
-    ? 'Not you? Sign in, remove passkeys you do not recognise and review Security events.'
-    : 'Not you? On the server run "cli.js sessions revoke-all" and review Security events.';
+    ? 'Not you? Sign in, choose "Sign out other sessions", remove passkeys you do not recognise and review Security events.'
+    : 'Not you? Sign in and choose "Sign out other sessions" (or on the server run "cli.js sessions revoke-all"), then review Security events.';
 
   // Out-of-band alert to every device of the account, so a change made with a stolen session
   // does not go unnoticed. High priority passes every device filter and the pause switch does
@@ -77,14 +79,35 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
     }
   }
 
+  // Database health for the overview, computed at most every HEALTH_CHECK_INTERVAL_MS: the check
+  // blocks the process while it reads the database, so it must not run on every request.
+  let health = { at: -Infinity, value: 'ok' };
+  function databaseHealth() {
+    const t = Date.now();
+    if (t - health.at >= HEALTH_CHECK_INTERVAL_MS) {
+      health = { at: t, value: db.prepare('PRAGMA quick_check').get().quick_check === 'ok' ? 'ok' : 'error' };
+    }
+    return health.value;
+  }
+
+  // Test notifications go through the same per-account and global budgets as sent ones.
+  function takeSendBudget(accountId) {
+    for (const [bucket, id] of [[limits.perAccount, accountId], [limits.global, 'global']]) {
+      const wait = bucket.take(id);
+      if (wait) throw errors.rateLimited(wait);
+    }
+  }
+
   function challengeResponse(result) {
     return { challenge_id: result.challengeId, options: result.options };
   }
 
   // A stale or unknown challenge is not a credential failure and is not counted toward the
   // brute-force block (otherwise someone else's challenge flood could lock the admin out).
+  // While a client is blocked, further failures are refused with 429 and not counted.
   function verifyFailed(result, ip, event) {
     if (result.error === 'challenge') throw errors.badRequest('challenge_expired', 'Challenge expired or unknown; start again');
+    checkBlocked(ip);
     limits.adminFailures.fail(clientKey(ip));
     audit.recordThrottled(event, { ip, detail: { reason: 'verification_failed' } });
     throw errors.unauthorized();
@@ -102,8 +125,8 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
       const session = auth.getSession(readCookie(req, SESSION_COOKIE));
       // With several accounts, signing in is always offered: the passkey picks the account.
       const common = { accounts: multiAccount ? 'multiple' : 'single', features, web };
-      if (!session) return { authenticated: false, setup_complete: multiAccount || auth.hasAdmin(DEFAULT_ACCOUNT), ...common };
-      const account = accounts.get(session.accountId);
+      const account = session && accounts.get(session.accountId);
+      if (!account) return { authenticated: false, setup_complete: multiAccount || auth.hasAdmin(DEFAULT_ACCOUNT), ...common };
       return {
         authenticated: true, setup_complete: true, csrf_token: session.csrf, expires_at: session.expiresAt,
         account: { id: account.id, name: account.name }, ...common,
@@ -137,12 +160,11 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
     }],
 
     // ---- login ----
-    ['POST', /^\/admin\/api\/login\/options$/, { auth: false }, async ({ client }) => {
-      checkBlocked(client.ip);
-      return challengeResponse(await auth.authenticationOptions());
-    }],
+    // A block after failed sign-ins never refuses a valid passkey: anyone sharing the
+    // administrator's address (NAT, the same /64) could otherwise lock them out at will.
+    // Passkeys cannot be guessed; the block limits the noise and marks the client in the events.
+    ['POST', /^\/admin\/api\/login\/options$/, { auth: false }, async () => challengeResponse(await auth.authenticationOptions())],
     ['POST', /^\/admin\/api\/login\/verify$/, { auth: false }, async ({ req, res, client }) => {
-      checkBlocked(client.ip);
       const data = await body(req, schemas.loginVerify);
       const result = await auth.verifyAuthentication({ challengeId: data.challenge_id, response: data.response });
       if (!result.id) verifyFailed(result, client.ip, 'admin.login_failed');
@@ -152,11 +174,12 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
       const s = startSession(res, result.id);
       return { ok: true, csrf_token: s.csrf };
     }],
-    // Re-confirmation with a passkey for `fresh` routes, without starting a new session.
-    ['POST', /^\/admin\/api\/reauth\/options$/, {}, async () => challengeResponse(await auth.authenticationOptions('reauth'))],
+    // Re-confirmation with a passkey for `fresh` routes, without starting a new session. The
+    // challenge is bound to the session that asked for it.
+    ['POST', /^\/admin\/api\/reauth\/options$/, {}, async ({ session }) => challengeResponse(await auth.authenticationOptions('reauth', session.hash))],
     ['POST', /^\/admin\/api\/reauth\/verify$/, {}, async ({ req, session, client }) => {
       const data = await body(req, schemas.loginVerify);
-      const result = await auth.verifyAuthentication({ kind: 'reauth', challengeId: data.challenge_id, response: data.response });
+      const result = await auth.verifyAuthentication({ kind: 'reauth', challengeId: data.challenge_id, response: data.response, sessionHash: session.hash });
       // Only a passkey of the session's own account can confirm its changes.
       if (!result.id || result.accountId !== session.accountId) throw errors.badRequest('verification_failed', 'Passkey confirmation failed');
       auth.markVerified(session.hash);
@@ -169,6 +192,13 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
       audit.record('admin.logout', { accountId: session.accountId, actor: 'admin', ip: client.ip });
       return { ok: true };
     }],
+    // Signs out every other session of the account, e.g. one opened with a stolen cookie.
+    ['POST', /^\/admin\/api\/sessions\/revoke-others$/, { fresh: true }, ({ session, client }) => {
+      const revoked = auth.revokeAllSessions(session.accountId, { except: session.hash });
+      audit.record('admin.sessions_revoked', { accountId: session.accountId, actor: 'admin', ip: client.ip, detail: { count: revoked } });
+      securityAlert(session.accountId, 'Other sessions signed out', `${revoked} other session(s) of this account were signed out.`, client);
+      return { revoked };
+    }],
 
     // ---- overview / health ----
     ['GET', /^\/admin\/api\/overview$/, {}, ({ client, session }) => {
@@ -180,7 +210,7 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
       return {
         version,
         uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
-        database: db.prepare('PRAGMA quick_check').get().quick_check === 'ok' ? 'ok' : 'error',
+        database: databaseHealth(),
         notifications_enabled: config.notificationsEnabled,
         sending_paused: accounts.isPaused(session.accountId),
         active_keys: keys.list(session.accountId).filter((k) => k.status === 'active').length,
@@ -211,6 +241,9 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
       const data = await body(req, schemas.createKey);
       if (data.expires_at != null && data.expires_at <= Date.now()) {
         throw errors.badRequest('validation_failed', 'Request body is invalid', { details: [{ field: 'expires_at', issue: 'must be in the future' }] });
+      }
+      if (keys.list(session.accountId).filter((k) => k.status === 'active').length >= config.maxApiKeys) {
+        throw new HttpError(409, 'key_limit', 'Maximum number of active API keys reached; revoke one first');
       }
       const scopes = data.allow_high_priority ? [SCOPES.SEND, SCOPES.SEND_HIGH] : [SCOPES.SEND];
       const { key, record } = keys.create(session.accountId, { name: data.name, description: data.description ?? '', expiresAt: data.expires_at ?? null, scopes });
@@ -283,6 +316,7 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
     ['POST', /^\/admin\/api\/test-push$/, {}, async ({ req, client, session }) => {
       const data = await body(req, schemas.testPush);
       if (data.device_id && !devices.get(session.accountId, data.device_id)) throw errors.notFound();
+      takeSendBudget(session.accountId);
       const outcome = await pusher.deliver({
         accountId: session.accountId,
         title: 'Pushgate test',
@@ -300,10 +334,14 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
     ['GET', /^\/admin\/api\/passkeys$/, {}, ({ session }) => ({
       passkeys: auth.listPasskeys(session.accountId).map((p) => ({ ...p, current: p.id === session.passkeyId })),
     })],
-    ['POST', /^\/admin\/api\/passkeys\/options$/, { fresh: true }, async ({ session }) => challengeResponse(await auth.registrationOptions('add', session.accountId))],
+    ['POST', /^\/admin\/api\/passkeys\/options$/, { fresh: true }, async ({ session }) => {
+      if (auth.listPasskeys(session.accountId).length >= config.maxPasskeys) throw passkeyLimit();
+      return challengeResponse(await auth.registrationOptions('add', session.accountId));
+    }],
     ['POST', /^\/admin\/api\/passkeys\/verify$/, { fresh: true }, async ({ req, client, session }) => {
       const data = await body(req, schemas.addPasskeyVerify);
       const result = await auth.verifyRegistration({ kind: 'add', accountId: session.accountId, challengeId: data.challenge_id, response: data.response, name: data.name });
+      if (result.error === 'limit') throw passkeyLimit();
       if (!result.id) throw errors.badRequest('verification_failed', 'Passkey registration failed');
       audit.record('admin.passkey_added', { accountId: session.accountId, actor: 'admin', ip: client.ip, detail: { passkey: data.name } });
       securityAlert(session.accountId, 'Passkey added', `Passkey "${data.name}" was added to the administrator account.`, client);
@@ -320,29 +358,43 @@ export function createAdminRoutes({ config, db, log, accounts, keys, devices, pu
     }],
   ];
 
+  function passkeyLimit() {
+    return new HttpError(409, 'passkey_limit', 'Maximum number of passkeys reached; remove one first');
+  }
+
   // Events nobody could be identified for (rejected networks, unknown keys) concern the whole
-  // server: only a single-account installation shows them to its administrator.
+  // server: only the administrator of a single-account installation sees them.
   function auditList(accountId, before) {
     const b = before && /^\d{1,15}$/.test(before) ? Number(before) : null;
-    return audit.list(accountId, { limit: 100, before: b, includeUnattributed: !multiAccount });
+    return audit.list(accountId, { limit: 100, before: b, includeUnattributed: !multiAccount && accountId === DEFAULT_ACCOUNT });
   }
 
   // Access checks for one route, shared with plugin routes: same-origin for every change
   // (unless a route explicitly accepts cross-site requests), then either the per-client limit
-  // for anonymous endpoints or a session with CSRF token, and a recent passkey if `fresh`.
+  // for anonymous endpoints or a session with CSRF token, the per-account limit, and a recent
+  // passkey if `fresh`. Anonymous plugin routes have their own bucket (`anonymousLimit:
+  // 'plugin'`), so sign-ups or webhooks do not use up the administrator's sign-in budget.
   function authorize(req, client, opts) {
     if (req.method !== 'GET' && !opts.crossOrigin) requireSameOrigin(req);
     if (opts.auth === false) {
       // Endpoints anyone can call (session check, login, enrollment) are rate limited per client
       // inside the app, independent of any reverse proxy configuration.
-      const wait = limits.adminAnonymous.take(clientKey(client.ip));
+      const plugin = opts.anonymousLimit === 'plugin';
+      const wait = (plugin ? limits.pluginAnonymous : limits.adminAnonymous).take(clientKey(client.ip));
       if (wait) {
-        audit.recordThrottled('rate_limited', { ip: client.ip, detail: { limit: 'admin_anonymous' } });
+        audit.recordThrottled('rate_limited', { ip: client.ip, detail: { limit: plugin ? 'plugin_anonymous' : 'admin_anonymous' } });
         throw errors.rateLimited(wait);
       }
       return null;
     }
     const session = requireSession(req, client);
+    // Signed-in requests are limited per account: one account must not be able to keep the
+    // shared server busy for everyone else.
+    const wait = limits.adminSession.take(session.accountId);
+    if (wait) {
+      audit.recordThrottled('rate_limited', { accountId: session.accountId, actor: 'admin', ip: client.ip, detail: { limit: 'admin_session' } });
+      throw errors.rateLimited(wait);
+    }
     if (opts.fresh && !auth.recentlyVerified(session)) {
       throw new HttpError(403, 'reauth_required', 'Confirm with your passkey to make this change');
     }

@@ -4,6 +4,7 @@
 // one is a separate administrator with its own keys and devices.
 import crypto from 'node:crypto';
 import { transaction } from './db.js';
+import { validate } from './validate.js';
 
 export const DEFAULT_ACCOUNT = 'default';
 export const ACCOUNT_ID = /^(default|acc_[0-9a-f]{16})$/;
@@ -15,11 +16,33 @@ export function checkAccountId(id) {
   return id;
 }
 
+// Thrown when data would be added to an account that no longer exists: a request that passed
+// its session check before the account was removed must not recreate rows for it. Answered
+// with 401, like a missing session.
+export class UnknownAccountError extends Error {
+  constructor() {
+    super('unknown account');
+  }
+}
+
+// Called synchronously right before an insert (node:sqlite is synchronous, so nothing can
+// remove the account in between).
+export function requireAccount(db, id) {
+  if (!db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(checkAccountId(id))) throw new UnknownAccountError();
+}
+
+// Names come from sign-up forms (via plugins) and are printed by the CLI and shown in the web
+// app: one line of visible text, the same rules as other names.
+const NAME_FIELDS = { name: { type: 'string', required: true, minLength: 1, maxLength: 64 } };
+function checkName(name) {
+  if (validate({ name }, NAME_FIELDS).length) throw new TypeError('account name must be 1-64 characters without control characters');
+}
+
 export function createAccounts(db, { now = () => Date.now() } = {}) {
   const publicView = (row) => ({ id: row.id, name: row.name, sending_paused: row.sending_paused === 1, created_at: row.created_at });
 
   function create({ name }) {
-    if (typeof name !== 'string' || name.length < 1 || name.length > 64) throw new TypeError('account name must be 1-64 characters');
+    checkName(name);
     const id = `acc_${crypto.randomBytes(8).toString('hex')}`;
     db.prepare('INSERT INTO accounts (id, name, created_at) VALUES (?, ?, ?)').run(id, name, now());
     return get(id);
@@ -36,6 +59,7 @@ export function createAccounts(db, { now = () => Date.now() } = {}) {
   }
 
   function rename(id, name) {
+    checkName(name);
     return db.prepare('UPDATE accounts SET name = ? WHERE id = ?').run(name, checkAccountId(id)).changes === 1;
   }
 

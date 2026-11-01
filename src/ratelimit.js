@@ -1,7 +1,11 @@
 // In-memory rate limiting. State is per process and resets on restart, which is acceptable
 // for a single-instance service: limits exist to contain floods, not to meter usage.
+import { performance } from 'node:perf_hooks';
 
 const MAX_TRACKED = 10000;
+// A monotonic clock: a wall clock stepped back (NTP, restored VM) would otherwise drain every
+// bucket and stretch every block by the size of the step.
+const monotonic = () => performance.now();
 
 // Bounded memory: when full, drop the oldest tenth of the entries (Map keeps insertion order),
 // skipping entries for which keep() is true. Kept entries may use up to twice the normal
@@ -18,7 +22,7 @@ function makeRoom(map, keep = () => false) {
 }
 
 // Token bucket: `perMinute` tokens per minute with a burst of the same size.
-export function createRateLimiter(perMinute, { now = () => Date.now() } = {}) {
+export function createRateLimiter(perMinute, { now = monotonic } = {}) {
   const buckets = new Map();
   const ratePerMs = perMinute / 60000;
 
@@ -32,8 +36,9 @@ export function createRateLimiter(perMinute, { now = () => Date.now() } = {}) {
         b = { tokens: perMinute, at: t };
         buckets.set(id, b);
       }
-      b.tokens = Math.min(perMinute, b.tokens + (t - b.at) * ratePerMs);
-      b.at = t;
+      // Elapsed time never counts as negative, even with an injected clock that goes back.
+      b.tokens = Math.min(perMinute, b.tokens + Math.max(0, t - b.at) * ratePerMs);
+      b.at = Math.max(b.at, t);
       if (b.tokens >= 1) {
         b.tokens -= 1;
         return 0;
@@ -45,7 +50,7 @@ export function createRateLimiter(perMinute, { now = () => Date.now() } = {}) {
 
 // Counts failures per client within a window; once `limit` is reached the client is blocked
 // for `blockMs`. Used against credential guessing on the API and the admin login.
-export function createFailureLimiter({ limit, windowMs, blockMs, now = () => Date.now() }) {
+export function createFailureLimiter({ limit, windowMs, blockMs, now = monotonic }) {
   const entries = new Map();
 
   return {

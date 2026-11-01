@@ -8,7 +8,7 @@
 // API needs no account); all management functions take the account first and never reach
 // another account's keys.
 import crypto from 'node:crypto';
-import { checkAccountId } from './accounts.js';
+import { checkAccountId, requireAccount } from './accounts.js';
 import { transaction } from './db.js';
 
 export const SCOPES = Object.freeze({
@@ -49,6 +49,7 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
     if (expiresAt !== null && expiresAt <= now()) throw new Error('expiry must be in the future');
     const id = crypto.randomBytes(8).toString('hex');
     const key = `pgk_${id}_${crypto.randomBytes(32).toString('base64url')}`;
+    requireAccount(db, accountId);
     db.prepare(`INSERT INTO api_keys (id, account_id, name, description, key_hash, scopes, created_at, expires_at, rotated_from)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, accountId, name, description, hash(key).toString('hex'), JSON.stringify([...new Set(scopes)]), now(), expiresAt, rotatedFrom);
@@ -64,8 +65,10 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
     return db.prepare('SELECT * FROM api_keys WHERE account_id = ? ORDER BY created_at DESC').all(checkAccountId(accountId)).map(publicView);
   }
 
-  // Returns { ok: true, key } or { ok: false, reason, keyId }. Callers must not reveal the
-  // reason to the client; it is for audit logging only.
+  // Returns { ok: true, key } or { ok: false, reason, keyId, accountId }. Callers must not
+  // reveal the reason to the client; it is for audit logging only. `accountId` is set only
+  // when the full secret matched (a revoked or expired key), so a guess with a known key id
+  // cannot add events to an account.
   function verify(presented) {
     if (typeof presented !== 'string' || presented.length > 100) return { ok: false, reason: 'malformed', keyId: null };
     const m = KEY_PATTERN.exec(presented);
@@ -76,9 +79,9 @@ export function createApiKeys(db, pepper, { now = () => Date.now() } = {}) {
     // Always perform one constant-time comparison so that unknown ids cost the same.
     const expected = row ? Buffer.from(row.key_hash, 'hex') : dummyHash;
     const match = crypto.timingSafeEqual(actual, expected);
-    if (!row || !match) return { ok: false, reason: row ? 'mismatch' : 'unknown', keyId };
-    if (row.revoked_at) return { ok: false, reason: 'revoked', keyId };
-    if (row.expires_at !== null && row.expires_at <= now()) return { ok: false, reason: 'expired', keyId };
+    if (!row || !match) return { ok: false, reason: row ? 'mismatch' : 'unknown', keyId, accountId: null };
+    if (row.revoked_at) return { ok: false, reason: 'revoked', keyId, accountId: row.account_id };
+    if (row.expires_at !== null && row.expires_at <= now()) return { ok: false, reason: 'expired', keyId, accountId: row.account_id };
     db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(now(), keyId);
     return { ok: true, key: publicView(row) };
   }
