@@ -461,7 +461,15 @@ lets in-flight deliveries finish (≤ 10 s) and closes the database.
 ## Troubleshooting iOS delivery
 
 - **No "Enable notifications" button / "not supported":** open the app from the Home Screen icon,
-  not Safari; check iOS ≥ 16.4; the page must be HTTPS with a trusted certificate.
+  not Safari; check iOS ≥ 16.4; the page must be HTTPS with a trusted certificate. The message
+  ends with what the phone reports, e.g. `(iOS 18.7, secure connection: yes, Home Screen app: yes,
+  service worker: no, …)`.
+- **`service worker: no` on an iPhone (often Lockdown Mode):** Lockdown Mode turns off service
+  workers, and with them Web Push, for every website and Home Screen app that is not excluded.
+  Exclude pushgate's site: open its address in Safari, tap **aA** in the address bar →
+  **Website Settings**, turn off **Lockdown Mode**, then close the Home Screen app completely and
+  open it again. Excluded websites are listed under *Settings → Privacy & Security → Lockdown
+  Mode → Configure Web Browsing*. Safari's *Block All Cookies* setting has the same effect.
 - **Permission prompt never appears:** it needs a tap; if previously denied, enable it in
   *Settings → Notifications → Pushgate* (only exists after adding to the Home Screen).
 - **API says `delivered` but nothing shows:** check Focus/Do Not Disturb and notification summary

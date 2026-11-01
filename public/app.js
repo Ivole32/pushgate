@@ -171,6 +171,15 @@ function pushSupport() {
   if (isIOS() && !isStandalone() && !hasPushApi()) return `Open Pushgate from the Home Screen icon to enable notifications. (${pushDetails()})`;
   if ('serviceWorker' in navigator && hasPushApi()) return null;
   if (!isIOS()) return `This browser does not support Web Push. (${pushDetails()})`;
+  // Lockdown Mode turns off service workers, and with them push, for websites and Home Screen
+  // apps unless the site is excluded.
+  if (!('serviceWorker' in navigator)) {
+    return 'iOS has turned off service workers for this app, and push notifications need them. This is usually '
+      + 'Lockdown Mode: open this address in Safari, tap aA in the address bar → Website Settings, turn off '
+      + 'Lockdown Mode for this website, then close the Home Screen app completely and open it again. (Excluded '
+      + 'websites are listed under Settings → Privacy & Security → Lockdown Mode → Configure Web Browsing.) '
+      + `Safari's "Block All Cookies" setting has the same effect. (${pushDetails()})`;
+  }
   return 'iOS does not offer push notifications to this Home Screen app. They need iOS 16.4 or later, and iOS '
     + 'enables them only for apps added to the Home Screen from Safari with their web app manifest: remove the '
     + 'Pushgate icon, open this address in Safari, choose Share → Add to Home Screen, and open it from the new icon. '
